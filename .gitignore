@@ -1,0 +1,6 @@
+.venv/
+.venv-metal/
+.env
+__pycache__/
+*.pyc
+.DS_Store
