@@ -112,3 +112,10 @@ MODEL=mistralai/Mistral-7B-Instruct-v0.3 \
   VLLM_BIN=.venv/bin/vllm \
   ./scripts/serve.sh
 ```
+
+## Known issues filed upstream
+
+While building this, two real bugs were identified, root-caused, and reported upstream rather than just worked around silently:
+
+- **[apache/tvm-ffi#697](https://github.com/apache/tvm-ffi/issues/697)** — segfault in `TVMFFIEnvRegisterCAPI` on macOS arm64 with `apache-tvm-ffi==0.1.13`; resolved by pinning `0.1.12` (see the compatibility note above). Cross-posted to **[mlc-ai/xgrammar#799](https://github.com/mlc-ai/xgrammar/issues/799)**, since `xgrammar` is the dependency most people will actually hit this crash through.
+- **[vllm-project/vllm-metal#274](https://github.com/vllm-project/vllm-metal/issues/274)** — investigated a Metal OOM crash class on this hardware; found the specific mechanism already covered in more depth by **[vllm-project/vllm-metal#398](https://github.com/vllm-project/vllm-metal/issues/398)** (`metal_limit` reported by Metal is meaningfully less than total system RAM), which was closed via a merged fix. Independently reproduced the same `metal_limit`-vs-total-RAM arithmetic on this machine — see the `--gpu-memory-utilization` breakdown in Phase 1 notes.
