@@ -6,6 +6,7 @@ VLLM_API_KEY="${VLLM_API_KEY:-local-vllm-key}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-2048}"
 VLLM_BIN="${VLLM_BIN:-.venv-metal/bin/vllm}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-}"
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-}"
 
 # Keep single-node distributed initialization on the loopback interface.
 # Without these defaults, macOS may select a transient/private interface that
@@ -28,6 +29,10 @@ ARGS=(serve "$MODEL"
 
 if [[ -n "$GPU_MEMORY_UTILIZATION" ]]; then
   ARGS+=(--gpu-memory-utilization "$GPU_MEMORY_UTILIZATION")
+fi
+
+if [[ -n "$MAX_NUM_SEQS" ]]; then
+  ARGS+=(--max-num-seqs "$MAX_NUM_SEQS")
 fi
 
 exec "$VLLM_BIN" "${ARGS[@]}"
