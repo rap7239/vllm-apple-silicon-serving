@@ -214,87 +214,43 @@ a clean first run with plausible-looking output (all-zero metrics at
 concurrency=1) is not the same as a verified run. The five-second `curl`
 check cost almost nothing and turned an assumption into a fact.
 
-## Entry: Building `vllm-benchmark` — streaming harness, wrong tree, and a cold-start TTFT outlier
+## Entry: Fixing a duplicated/mangled log entry — a meta-lesson about editing this very file
 
 **Date:** 2026-08-02
 
-### What I set out to do
+### What happened
 
-Phase 1 Task 3: hook vLLM into a benchmark harness, extending the log schema
-with TPOT, ITL, `gpu_util_pct`, `kv_cache_used_pct`, and `queue_depth`. An
-existing harness (`llm-benchmark-module1`, a Coursera lab) already logged
-`ttft_ms` / `total_ms` / `tokens_per_sec` / `cost_per_task`, but against
-OpenAI's hosted API, non-streaming, sequential — it approximated
-`ttft_ms` as total request latency, which cannot separate prefill from
-decode. Decision: don't retrofit that harness. Build a new one, purpose-built
-for a local streaming vLLM target, and keep the old harness only as a
-reference for field naming.
+While appending the `vllm-benchmark` entry above, a stray local git clone
+(a folder named "New project" whose `origin` happened to point at this same
+GitHub repo, from an earlier unrelated setup step) was used to push the
+entry once. Working from the *actual* local clone shortly after, unaware the
+first push had already landed, the same entry was appended a second time —
+producing a duplicate section in this file.
 
-### Design decisions made before writing code
+Attempting to fix the duplicate by hand in `nano` (mark-and-cut a multi-line
+block) did not fully work: the cut landed mid-sentence inside the second
+copy rather than cleanly between the two headings, leaving one and a half
+copies of the entry spliced together, with a heading fragment
+(`## Entry: Building...`) embedded mid-sentence and the first copy's own
+heading demoted from `##` to `#`. `grep -c` on the heading text kept
+reporting 2 matches, but the second "match" was actually that embedded
+fragment, not a clean second copy — a reminder that a match count alone
+doesn't tell you *what* matched.
 
-- **Streaming-only**, not a `--stream/--no-stream` flag. True TTFT/TPOT/ITL
-  requires per-token timestamps, which only streaming provides.
-- **Metrics via vLLM's `/metrics` Prometheus endpoint**, not stdout log
-  regex. Same mechanism the later Grafana task will use — not throwaway
-  code.
-- **New standalone repo**, not a folder inside `vllm-apple-silicon-serving`.
-  The master plan itself names Phase 1–8 deliverables under an
-  `llm-serving-lab/*` convention.
+### The fix
 
-### Repo naming: plan says `org/repo`, GitHub said no
-
-The master plan's literal naming (`llm-serving-lab/vllm-benchmark`) reads
-like an org-scoped repo path. Tried to create it under a personal account —
-GitHub auto-collapsed it to `llm-serving-lab-vllm-benchmark`, since `/` isn't
-a legal character in a personal-account repo name. Considered just accepting
-the hyphenated name (zero setup) vs. creating a real `llm-serving-lab`
-GitHub organization (true `org/repo` URLs, a real landing page at
-`github.com/llm-serving-lab`, closer portfolio signal to a recruiter looking
-at 5+ repos over the next 22 weeks). Went with the real org — worth the
-five minutes of setup for a project this size.
-
-### Verification-first didn't stop applying just because the harness worked
-
-The harness ran clean on the first real attempt against the live server —
-5 requests, 5 ok, 0 errors, real non-zero TTFT/TPOT numbers per request.
-Easy to declare victory there. But all three scheduler metrics
-(`num_requests_running`, `num_requests_waiting`, `kv_cache_usage_perc`) read
-`0.0` across every row, and "concurrency=1 plausibly explains all-zeros" is
-exactly the kind of unverified assumption the `--max-num-seqs` entry in this
-log already burned time on. Ran `curl http://localhost:8000/metrics | grep
-vllm:` directly against the idle server instead of trusting the plausible
-story. Confirmed: metric names and format matched the harness's regex
-exactly, and `0.0` was a genuinely accurate idle-state reading, not a
-parsing failure silently returning `None`-as-zero. Correct outcome, but only
-because it was checked rather than assumed.
-
-### The 21-second TTFT outlier — real signal, not a bug
-
-First run's per-request TTFT values: prompt 3 at 21,423ms, prompts 1/4/2/5
-in the 295ms–1.7s range. `asyncio.as_completed` yields results in completion
-order, not submission order — prompt 3 was submitted first and happened to
-finish last. Cross-referenced against the vLLM server log: "Avg prompt
-throughput: 1.5 tokens/s" on the very first request, consistent with the
-MLX Metal-shader JIT-compile cold-start cost already documented in the
-`--max-num-seqs` entry above. Lesson for the eventual writeup: TTFT as
-measured isn't purely "prompt processing time" — it also absorbs whatever
-one-time or queueing cost happens to land on that specific request. A
-saturation-curve run (the next Phase 1 task) needs either a warm-up request
-excluded from the stats, or an explicit note that request 1 in any cold-start
-run is not comparable to steady-state TTFT.
-
-### Open item carried forward
-
-`vllm:num_requests_waiting_by_reason` (splits waiting requests into
-`capacity` vs `deferred`) exists in this vLLM version's `/metrics` output
-but isn't captured by the harness yet. Not needed for the saturation-curve
-task, but relevant once the plan reaches admission-control/backpressure
-work later in Phase 1/3 — that label is exactly what distinguishes "queue is
-full" from "something else is blocking scheduling."
+Rather than attempt a third manual in-place edit (each one so far had
+introduced a new, different failure mode), the full file was reconstructed
+from a known-good copy of the content and pasted in as a complete
+replacement, verified by full read-through rather than a partial `grep`
+check.
 
 ## Meta-lesson for the writeup
 
-Same verification discipline as the previous entry, applied in a new spot:
-a clean first run with plausible-looking output (all-zero metrics at
-concurrency=1) is not the same as a verified run. The five-second `curl`
-check cost almost nothing and turned an assumption into a fact.
+Three failure modes stacked on the same underlying cause: trusting a git
+remote's identity without checking `pwd`/`git remote -v` first, then trusting
+a partial edit's success from an incomplete signal (`grep -c` count) instead
+of reading the actual resulting content. The fix that finally worked was the
+one that verified the *whole* file, not a count or a spot check. Same lesson
+as the two entries above, expressed a third way: verify state directly,
+don't infer it from a proxy signal.
