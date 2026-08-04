@@ -850,3 +850,222 @@ mismatch) but the pattern catching all of them was identical: don't accept
 a plausible-looking result without checking it against something concrete
 -- a server log, a hand-computed expected value, or the rendered image
 itself.
+
+## Entry: Task 6 — Grafana dashboard, and the DCGM gap resolved with a purpose-built exporter
+
+**Date:** 2026-08-03
+
+### What Task 6 asked for
+
+Build a Grafana dashboard with 6 panels: TTFT heatmap, tokens/sec vs
+concurrency, p99 trend, GPU SM utilization, HBM bandwidth, KV cache fill
+level. Two of the six (GPU SM utilization, HBM bandwidth) are standard DCGM
+panels in the master plan's reference design — DCGM is NVIDIA-only, already
+flagged as a gap in `vllm-benchmark/README.md`'s "Known limitation" section
+from earlier work on this project.
+
+### Decision: build a real exporter, not a placeholder
+
+Considered three options for the two DCGM-dependent panels: (1) build a
+`powermetrics`-based exporter and get real (if differently-sourced) data
+into those panels, (2) leave them as documented "no data" placeholders, (3)
+swap in two unrelated-but-available metrics instead. Chose (1) — a real
+substitute is a stronger interview story ("I adapted DCGM-equivalent
+observability to a platform NVIDIA's tooling doesn't support") than either
+alternative, and macOS's `powermetrics` genuinely does expose GPU
+utilization-adjacent data, just not in DCGM's exact shape.
+
+### Verifying `powermetrics`'s actual output format before writing a parser
+
+Rather than write a regex against a guessed or documentation-described
+format, found and fetched a real captured `powermetrics --samplers
+gpu_power` text-format sample (from a small open-source Go wrapper project,
+`BinSquare/powermetrics-go`, which ships an actual sample log used by its
+own test suite). Confirmed directly from that sample:
+
+- `GPU HW active frequency: <N> MHz` — real field, present
+- `GPU HW active residency:  <N>.<N>% (...)` — real field, present, genuine
+  analog to DCGM's SM-utilization percentage
+- `GPU idle residency:  <N>.<N>%` — real field, present
+- `GPU Power: <N> mW` — real field, present, but appears **twice** in one
+  sample block (once in a top-level CPU/GPU/ANE power summary, once again
+  inside the `**** GPU usage ****` section) — both values were numerically
+  identical in the sample examined, but nothing guarantees that holds
+  across `powermetrics` versions, so the regex was deliberately anchored to
+  the second (GPU-usage-section) occurrence rather than relying on the
+  first match being correct by luck. Verified this mattered with a stress
+  test: manually forced the two occurrences to diverge (999 vs 28) and
+  confirmed the parser still picked the correct one.
+- **No HBM/memory-bandwidth field exists anywhere in the sample.** Confirmed
+  by inspecting the real output rather than assuming the gap — Apple
+  Silicon's unified memory architecture has no discrete VRAM bus for a
+  bandwidth-utilization percentage to describe. Decision: rather than
+  fabricate a number or leave the panel silently empty, the HBM bandwidth
+  panel shows `GPU HW active frequency` instead, with the substitution
+  stated explicitly in the panel description, the exporter's own metric
+  HELP text, and the README — never silently swapped in.
+
+### What got built
+
+New `observability/` folder in this repo:
+- `docker-compose.yml` + `prometheus.yml` — Prometheus + Grafana in Docker,
+  scraping vLLM's existing `/metrics` (native process, unchanged from
+  `scripts/serve.sh`) and a new exporter (also native, not Dockerized,
+  since `powermetrics` needs direct host access and `sudo` that a
+  container on macOS's Docker Desktop VM cannot reach)
+- `powermetrics_exporter.py` — samples `powermetrics` continuously, parses
+  the four fields above, serves them in Prometheus text format on `:9400`
+- `grafana/provisioning/` — datasource + dashboard auto-provisioning, so
+  Grafana has the 6-panel dashboard already loaded on first startup rather
+  than requiring manual UI setup
+- `README.md` — architecture, quick start, and an explicit
+  verified/corroborated/unverified breakdown (see below)
+
+### What could and could not be verified from this session
+
+Working from a sandboxed Linux environment with no macOS, no Docker, no
+`sudo`, and no live vLLM server reachable, verification was necessarily
+partial — documented that honestly rather than presenting everything as
+equally confirmed:
+
+- **Directly verified**: the exporter's parsing logic, against the real
+  captured sample and a divergent-value stress test; all config files
+  parse as valid YAML/JSON; the dashboard JSON has all 6 panels.
+- **Corroborated, not directly tested against this project's server**:
+  `vllm:time_to_first_token_seconds` and `vllm:generation_tokens_total` —
+  confirmed as real vLLM metric names via vLLM's official metrics
+  documentation (web search), but not curl-verified against this project's
+  actual running server the way `num_requests_running`,
+  `num_requests_waiting`, and `kv_cache_usage_perc` were back in the Task 3
+  entry. Flagged explicitly in the README with the exact curl command to
+  run and which panels to fix if the names differ.
+- **Cannot be verified from this environment at all**: the actual `sudo
+  powermetrics` subprocess behavior, Docker Desktop's `host.docker.internal`
+  resolution on this specific machine, and whether the heatmap panel
+  renders meaningfully with real traffic. All flagged in the README under
+  "What's verified vs. what needs your confirmation" as next steps for a
+  live run, not silently assumed to work.
+
+## Meta-lesson for the writeup
+
+Two different verification postures were needed in the same task, and
+conflating them would have been dishonest either direction: claiming full
+confidence in things that were only corroborated by documentation (not
+tested against this specific server) would overstate certainty, while
+treating documentation-corroborated facts with the same suspicion as a
+pure guess would understate it. The useful move was sorting every claim
+into an explicit tier — directly verified, corroborated but not tested
+here, or simply untestable from this environment — and saying so plainly,
+rather than presenting a uniform "done" that papers over which parts still
+need a human with the actual hardware to confirm.
+
+## Entry: Task 6 live verification — the "No data" bug, a Grafana crash loop, and a working dashboard
+
+**Date:** 2026-08-03
+
+### The first failure: every panel showed "No data"
+
+`docker compose up -d` came up clean (Prometheus and Grafana both started,
+all three scrape targets showed `UP` on Prometheus's own targets page,
+`curl localhost:9400/metrics` and `curl localhost:8000/metrics` both
+returned real, correct data directly). Despite that, every one of the 6
+dashboard panels showed "No data" in Grafana.
+
+Root cause: every panel in `vllm-saturation-dashboard.json` referenced its
+datasource as `{"type": "prometheus", "uid": "${DS_PROMETHEUS}"}`. That
+`${DS_PROMETHEUS}` syntax is a Grafana template variable meant to be
+resolved during the UI's dashboard-import flow — it only gets substituted
+with a real datasource uid when a dashboard is uploaded through Grafana's
+"Import" screen. This dashboard was file-provisioned instead (dropped
+directly into `grafana/provisioning/dashboards/`), which never runs that
+substitution step, so every panel was left pointing at a literal,
+unresolved string that matched no real datasource. This was a real design
+mistake in the original dashboard JSON — written as if it would be
+UI-imported, then actually deployed via file provisioning, without checking
+that both paths handle datasource references the same way (they do not).
+
+Confusingly, manually opening a panel's Edit view and touching its
+Data source dropdown made that specific panel start working immediately —
+Grafana's query editor re-resolves the datasource live in that view. This
+made the bug look intermittent/panel-specific at first, until recognizing
+that only the panels someone had manually edited were fixed; the untouched
+ones were still reading the broken reference from the dashboard's stored
+state.
+
+**Fix**: added an explicit `uid: prometheus-vllm` to the datasource
+provisioning YAML (previously no uid was set, so Grafana auto-generated one
+unpredictably), then updated all 6 panels in the dashboard JSON to
+reference that fixed uid directly instead of the broken template variable.
+
+### The second failure: Grafana crash-looping after the fix
+
+Restarting with `docker compose restart grafana` didn't apply the fix, and
+a full `docker compose down && up -d` made things worse: Grafana entered a
+crash loop (`docker compose ps` showed `Restarting (1)` repeatedly, port
+3000 unreachable). `docker compose logs grafana` showed the real error:
+`"Failed to provision data sources" error="Datasource provisioning error:
+data source not found"`, escalating to a hard startup failure across every
+dependent module.
+
+Root cause: Grafana persists dashboard/datasource state into its own
+internal database, stored in the `grafana-data` Docker volume — it does not
+purely re-read the provisioning files fresh on every restart. The first
+time this stack ever started, Grafana loaded the dashboard with its broken
+`${DS_PROMETHEUS}` reference and wrote *something* into its internal
+database reflecting that broken state. After adding the new named
+`prometheus-vllm` datasource uid, Grafana's persisted internal state and
+the newly-provisioned config disagreed in a way it could not reconcile on
+startup, and it failed hard rather than silently.
+
+**Fix**: `docker compose down -v` (removing both named volumes, including
+the stale `grafana-data`) followed by `docker compose up -d`. This gave
+Grafana a genuinely clean slate with no conflicting persisted state to
+reconcile against — it started cleanly on the first attempt afterward.
+Losing Prometheus's ~10 minutes of scrape history in the same volume wipe
+was an acceptable, deliberate tradeoff — there was nothing in it worth
+preserving from this early testing phase.
+
+### Live verification: 10-concurrent-user benchmark run against the dashboard
+
+Ran a 10-user benchmark against the now-working dashboard and observed all
+6 panels update with real, mutually-consistent data:
+
+- Tokens/sec climbed from 0 to ~8 as `requests running (concurrency)`
+  ramped to 10, tracked on the dual-axis Tokens/sec vs Concurrency panel
+- GPU active residency rose from an idle dip to a sustained ~100% right as
+  load hit, and GPU active frequency spiked from ~800 MHz to ~1,600 MHz in
+  the same window — both GPU panels agreeing with each other and with the
+  throughput panel that the GPU genuinely got busy, not just showing noise
+- TTFT p99 trended downward across the run (~1.3 min down toward the end),
+  consistent with the warmup-cluster cost documented extensively in the
+  Task 4 entries being amortized as the batched execution path stayed warm
+  through the run
+- KV cache fill level stayed flat near 0% the entire run — plausible for
+  only 10 short prompts against this model's context length, but the one
+  panel that didn't show clear movement. Flagged as worth re-checking with
+  a heavier or longer-context run later in the plan (a natural fit for
+  Phase 6's TensorRT-LLM/quantization work, which will need this same
+  dashboard) to confirm the panel is correctly wired rather than just
+  quiet by coincidence.
+
+Task 6's stated deliverable (Grafana dashboard, 6 panels: TTFT heatmap,
+tokens/sec vs concurrency, p99 trend, GPU SM utilization, HBM bandwidth,
+KV cache fill level) is complete and confirmed live, with the HBM bandwidth
+panel's documented substitution (GPU active frequency, since Apple Silicon
+exposes no bandwidth metric) holding up under real traffic the same way the
+other five panels did.
+
+## Meta-lesson for the writeup
+
+Two failure modes stacked here, and each one only became visible by trying
+the real thing rather than trusting the previous fix looked complete on
+paper. The datasource-uid bug could not have been caught from a sandboxed
+environment with no live Grafana to click through — this is exactly the
+kind of gap the earlier entry's "what's verified vs. what needs your
+confirmation" framing existed to flag honestly rather than paper over. The
+crash-loop that followed the first fix is a good instance of a fix
+introducing a *new*, different failure rather than resolving the original
+one cleanly — worth remembering that "the config is now correct" and "the
+running system reflects that correct config" are not the same claim,
+especially for any tool (Grafana here) that persists state outside the
+files you're editing.

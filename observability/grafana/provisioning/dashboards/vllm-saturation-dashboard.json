@@ -1,0 +1,131 @@
+{
+  "title": "vLLM Saturation & GPU Dashboard (M4 Mac mini)",
+  "uid": "vllm-saturation-m4",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": { "from": "now-30m", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "heatmap",
+      "title": "TTFT Heatmap",
+      "description": "Distribution of vLLM request time-to-first-token over time. Sourced from vllm:time_to_first_token_seconds, vLLM's own histogram metric. NOTE: this panel reflects live-traffic requests scraped continuously by Prometheus, not the vllm-benchmark harness's own CSV output (see ../../vllm-benchmark/runs/) -- the two are complementary, not the same data source. If vllm:time_to_first_token_seconds isn't present in your vLLM version's /metrics output, run `curl localhost:8000/metrics | grep -i ttft` (or `time_to_first_token`) to find the actual metric name and update this panel's query.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus-vllm" },
+      "targets": [
+        {
+          "expr": "sum(increase(vllm:time_to_first_token_seconds_bucket[1m])) by (le)",
+          "format": "heatmap",
+          "legendFormat": "{{le}}"
+        }
+      ],
+      "options": {
+        "calculate": false,
+        "yAxis": { "unit": "s" }
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Tokens/sec vs Concurrency",
+      "description": "vLLM's generation throughput over time, overlaid with the current number of running requests (a live proxy for concurrency). Two series on dual axes: throughput (tokens/sec, left) and vllm:num_requests_running (count, right) -- watching them together is how you visually spot the saturation point live, complementing the vllm-benchmark harness's own controlled sweep (see ../../vllm-benchmark/charts/saturation_curve.png for that authoritative offline analysis).",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus-vllm" },
+      "targets": [
+        {
+          "expr": "rate(vllm:generation_tokens_total[1m])",
+          "legendFormat": "tokens/sec",
+          "refId": "A"
+        },
+        {
+          "expr": "vllm:num_requests_running",
+          "legendFormat": "requests running (concurrency)",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "requests running (concurrency)" },
+            "properties": [{ "id": "custom.axisPlacement", "value": "right" }]
+          }
+        ]
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "TTFT p99 Trend",
+      "description": "Rolling p99 of vLLM's time-to-first-token histogram. This is the live/continuous version of the p99 trend the vllm-benchmark harness computes offline per concurrency level (see PHASE1_LOG.md, Task 4 entries, for the full concurrency 1-50 sweep and the inflection point found between 25 and 50).",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus-vllm" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(vllm:time_to_first_token_seconds_bucket[5m])) by (le))",
+          "legendFormat": "TTFT p99"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "GPU SM Utilization (Apple Silicon: HW Active Residency)",
+      "description": "NVIDIA DCGM has no Apple Silicon equivalent (see ../README.md and PHASE1_LOG.md for the full explanation). This panel uses powermetrics_gpu_active_residency_percent from this repo's powermetrics_exporter.py, which samples macOS's native `powermetrics --samplers gpu_power` and re-exposes 'GPU HW active residency' -- the closest available analog to DCGM's SM-utilization percentage on this hardware.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus-vllm" },
+      "targets": [
+        {
+          "expr": "powermetrics_gpu_active_residency_percent",
+          "legendFormat": "GPU active residency %"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100 } }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "GPU Active Frequency (substitute for HBM Bandwidth)",
+      "description": "IMPORTANT: this panel does NOT show HBM/memory bandwidth. Apple Silicon's unified memory architecture has no discrete VRAM bus, and `powermetrics` exposes no bandwidth-utilization field at all -- confirmed by inspecting a real captured powermetrics sample, not assumed. Rather than fabricate a number, this panel shows powermetrics_gpu_active_frequency_mhz (GPU clock speed while active) as the closest available GPU-performance signal on this hardware. See observability/README.md for the full explanation of this substitution and why it was made explicitly rather than silently.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus-vllm" },
+      "targets": [
+        {
+          "expr": "powermetrics_gpu_active_frequency_mhz",
+          "legendFormat": "GPU active frequency (MHz)"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "MHz" } }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "KV Cache Fill Level",
+      "description": "vllm:kv_cache_usage_perc from vLLM's own /metrics endpoint -- the same field the vllm-benchmark harness snapshots per-request (see run_bench.py's scrape_metrics()), now tracked continuously. Watch this alongside the saturation-curve findings in PHASE1_LOG.md: KV cache pressure is one of the standard root causes of p99 degradation under load, per the interview-probe cheat sheet in the master plan.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "datasource": { "type": "prometheus", "uid": "prometheus-vllm" },
+      "targets": [
+        {
+          "expr": "vllm:kv_cache_usage_perc * 100",
+          "legendFormat": "KV cache fill %"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 70 },
+              { "color": "red", "value": 85 }
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

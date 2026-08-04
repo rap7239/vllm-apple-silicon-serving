@@ -1,0 +1,55 @@
+# Observability stack for the vLLM saturation-curve work (Phase 1 Task 6).
+#
+# No top-level `version:` key -- modern Docker Compose (v2+) ignores it and
+# warns that it's obsolete; omitting it avoids the warning without changing
+# behavior.
+#
+# Prometheus and Grafana run in Docker. vLLM itself and the powermetrics
+# exporter run natively on the host (not in Docker) because:
+#   - vLLM is already run natively via scripts/serve.sh (see repo root),
+#     no reason to containerize it just for this task.
+#   - powermetrics requires `sudo` and direct access to macOS's kernel
+#     performance-counter interface, which is not available to a
+#     containerized process on macOS (Docker Desktop runs containers in a
+#     Linux VM, with no path to the host's powermetrics binary or its
+#     required privileges).
+#
+# host.docker.internal is Docker Desktop for Mac's DNS name for reaching
+# services running on the host machine from inside a container -- this is
+# how Prometheus (in Docker) scrapes vLLM's /metrics and the powermetrics
+# exporter's /metrics (both running natively on the Mac).
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: vllm-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: vllm-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      # Local-lab defaults only -- change before exposing this beyond
+      # localhost. Not a concern for this task (M4 Mac mini, loopback only).
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  prometheus-data:
+  grafana-data:
