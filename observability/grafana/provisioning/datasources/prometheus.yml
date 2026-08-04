@@ -1,0 +1,16 @@
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    # Fixed uid so the dashboard JSON (file-provisioned, not imported
+    # through Grafana's UI) can reference this datasource by a known,
+    # stable id. Without an explicit uid here, Grafana auto-generates one
+    # at provisioning time, which the dashboard JSON's panels have no way
+    # to predict -- that mismatch is what caused every panel to show
+    # "No data" the first time this stack was stood up (see PHASE1_LOG.md).
+    uid: prometheus-vllm
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true

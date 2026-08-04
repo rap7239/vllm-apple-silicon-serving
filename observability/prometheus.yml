@@ -1,0 +1,34 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  # vLLM's own built-in Prometheus endpoint. Exposes vllm:num_requests_running,
+  # vllm:num_requests_waiting, vllm:kv_cache_usage_perc, and others -- same
+  # metrics the vllm-benchmark harness's own scrape_metrics() function reads
+  # (see vllm-benchmark/scripts/run_bench.py), now being scraped continuously
+  # by Prometheus instead of once per benchmark request.
+  - job_name: "vllm"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:8000"]
+        labels:
+          service: "vllm"
+
+  # Apple-Silicon GPU metrics exporter (this repo's powermetrics_exporter.py).
+  # Stands in for NVIDIA DCGM, which has no Apple Silicon equivalent -- see
+  # observability/README.md and PHASE1_LOG.md for why this exists and what
+  # it can/cannot measure (no HBM bandwidth field is available; GPU active
+  # residency and frequency are used instead).
+  - job_name: "powermetrics_exporter"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:9400"]
+        labels:
+          service: "powermetrics"
+
+  # Prometheus scraping itself -- standard practice, useful for confirming
+  # the stack itself is healthy independent of vLLM/exporter state.
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
