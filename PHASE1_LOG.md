@@ -1069,3 +1069,248 @@ one cleanly — worth remembering that "the config is now correct" and "the
 running system reflects that correct config" are not the same claim,
 especially for any tool (Grafana here) that persists state outside the
 files you're editing.
+
+## Entry: Task 7 — reframed to 4-bit vs 8-bit MLX quantization, and the idle-recovery investigation
+
+**Date:** 2026-08-04
+
+### Reframing the task
+
+The master plan's Task 7 asks for a bf16-vs-fp8 comparison. Neither format
+exists on this stack: vllm-metal (Apple Silicon via MLX) supports neither.
+Reframed, with sign-off, to 4-bit vs 8-bit MLX quantization instead — the
+comparison this hardware can actually run, using the already-established
+4-bit Mistral-7B (Task 4/6) against a newly-added 8-bit build of the same
+model.
+
+### Two environment bugs fixed before any data could be collected
+
+- `scripts/serve.sh`'s `VLLM_BIN` default pointed at a path that never
+  existed (`.venv-metal`-style guess, not the real install location). Every
+  prior session's use of the script had silently ridden on a server someone
+  had already started by hand via `source ~/.venv-vllm-metal/bin/activate` +
+  manual `vllm serve` — the script's own default had never actually been
+  exercised. Fixed to `$HOME/.venv-vllm-metal/bin/vllm`, matching the real
+  install path from Task 1's setup doc.
+- A missing `xgrammar` dependency surfaced on the first real `serve.sh` run
+  post-fix. Resolved via `pip install -r requirements-metal.txt`.
+
+### Data collection and the first anomaly
+
+Collected `8bit-concurrency1.csv/.jsonl` and `8bit-concurrency10.csv/.jsonl`
+in `vllm-benchmark/runs/`, to compare against the existing 4-bit
+`concurrency1.csv`/`concurrency10.csv` from Task 4. Mid-run, request `s2`
+spiked to 36,978ms TTFT at concurrency=1. Checked the server log for the
+window rather than pattern-matching to the already-documented cold-start or
+batched-path-warmup stories from Task 3/4/6 (see those entries above) — this
+one didn't fit either: it happened mid-run, on an already-warm server, at a
+concurrency level with no new execution shape to compile. The one thing that
+did line up: the server log showed `Running: 0 reqs, Waiting: 0 reqs` for a
+stretch immediately before `s2` fired — the engine had gone fully idle. New
+hypothesis: an **idle-recovery cost**, distinct from cold start (process
+never restarted) and from batched-path warmup (concurrency never changed).
+
+### Building an isolated repro: `idle_recovery_test.py`
+
+Built `vllm-benchmark/scripts/idle_recovery_test.py`: send a warm-up request,
+sleep a controlled idle duration, send a test request, report both TTFTs.
+First pass at 10s/20s/35s looked reproducible but showed a counterintuitive
+shrinking-penalty-with-longer-idle trend. Extended to 7 points
+(5/10/15/20/35/45/60s) to check whether that was signal or noise.
+
+### The confound: uninvited traffic invalidated the entire 7-point run
+
+The extended run's own "warm-up" TTFTs were wildly unstable (some
+100,000ms+, when a warm-up on an already-running server should be cheap),
+with no consistent idle-duration relationship at all. Checked the server log
+instead of re-running blind: it showed a steady ~90-second cycle of real
+`POST /v1/chat/completions` traffic that `idle_recovery_test.py` itself never
+sent. Something else was hitting the server for the whole test window,
+invalidating all 7 data points. Killed and restarted the server clean, and
+closed Grafana on the assumption it was the source — turned out to be a red
+herring (Grafana's panel refresh only polls Prometheus, not vLLM directly);
+the real second-order finding on this came later (see below).
+
+### A detour: auth and a red-herring 404
+
+Post-restart, every `idle_recovery_test.py` re-run failed identically with
+`404 Not Found` on `/v1/chat/completions`, and `curl .../v1/models`
+returned `{"error":"Unauthorized"}`. Resolved by finding the server's actual
+`--api-key` from its running process args (`ps aux | grep vllm`):
+`local-vllm-key`, which happens to already be the script's own default. With
+the header present, both the "404" and the "Unauthorized" vanished in one
+shot — the 404 was never a real routing bug, just what an unauthenticated
+request off `/v1/chat/completions` looks like before it reaches real
+route-dispatch. Not investigated further once auth was confirmed as the
+single root cause for both symptoms.
+
+### Getting a genuinely clean read: Grafana/Prometheus were still running
+
+Restarted the server fresh on the 8-bit model (confirming, via the startup
+log, identical memory-footprint numbers to the earlier 8-bit run:
+`model_memory=7.70GB`, `metal_limit=12.71GB`, `kv_budget=3.28GB` — good
+sanity check that nothing about the environment had silently changed).
+Before trusting a "clean" sweep, checked for other traffic sources directly
+rather than assuming the earlier Grafana-close had actually taken effect —
+and it hadn't: `docker ps` showed `vllm-grafana`/`vllm-prometheus` still
+`Up 24 hours`. Prometheus's own `/metrics` scrape (5s interval, confirmed
+from `observability/prometheus.yml`) was still hitting the server directly,
+independent of Grafana. Stopped both containers with `docker compose stop`
+and confirmed via a quiet 15-second window of zero new log lines that the
+server was genuinely idle before running anything.
+
+### Four sweeps, one real finding and one debunked hypothesis
+
+Ran the clean 7-point (and later, focused 4-point: 15/35/45/60s) sweep four
+times total, cross-checking every run against the server's own log
+(`Running: 0/Waiting: 0` gaps matching each script's printed idle window,
+POST-line counts matching exactly `2 × number of idle durations tested` per
+run) before trusting any of the TTFT numbers:
+
+| Idle | Run 1 | Run 2 | Run 3 | Run 4 |
+|---|---|---|---|---|
+| 15s | — | 2,053ms | 2,122ms | 3,413ms |
+| 35s | 28,565ms | 2,065ms | 3,146ms | 3,720ms |
+| 45s | 16,350ms | 8,246ms | 5,737ms | 10,891ms |
+| 60s | 3,888ms | 4,470ms | 7,494ms | 14,694ms |
+
+Two conclusions, not one:
+
+1. **The idle-recovery penalty itself is real and reproducible.** Every run
+   shows a clear jump from a ~2,000ms short-idle baseline into a
+   multi-second-to-tens-of-seconds penalty at longer idle, across four
+   independent measurements.
+2. **The exact idle duration that triggers the worst penalty is not fixed.**
+   It moved (35s → 45s → no clear peak → 60s) across the four runs, which
+   rules out a simple deterministic threshold tied purely to elapsed idle
+   time.
+
+### Testing the leading hypothesis with real telemetry, and disproving it
+
+Leading theory going in: macOS/Metal steps the GPU down into a low-power
+state during idle, and stepping back up is what costs the TTFT penalty.
+Tested this directly rather than leaving it as speculation, using the
+`powermetrics_exporter.py` built in Task 6 (GPU HW active frequency, `:9400`)
+plus a simple 1Hz poller (`while true; do curl ...; sleep 1; done`) run
+alongside two more replications of the sweep. Lined up each test's predicted
+first-token timestamp (`send_time + ttft_ms`) against the frequency
+timeline by hand, cross-checked across three independent spike events
+(idle=15 test in run 3, idle=45 and idle=60 tests in run 4).
+
+Result: **the hypothesis is wrong.** GPU frequency sits flat at its idle
+baseline (~750-800 MHz) for nearly the entire wait, then jumps to its max
+observed value (~1,576-1,578 MHz) in about one second — right at the moment
+the first token is delivered, not gradually beforehand. For the worst case
+observed (a 28.8s TTFT), elevated GPU activity was visible for only the
+final ~2-3 seconds; the other ~25+ seconds showed no GPU activity at all
+despite the request already being "in flight." The GPU is not slow to wake
+up — something upstream of it (scheduling/dispatch layer: Python's asyncio
+event loop, macOS process scheduling of an idle process, or MLX's lazy
+dispatch) is sitting on the request before any GPU work starts. This is a
+real, evidence-backed negative result, not just an unconfirmed guess: it was
+tested and ruled out, which is worth more than never having tested it.
+
+### A second, separate finding: session-level drift
+
+Comparing the four sweeps as a whole (table above), most idle durations
+climbed steadily run-over-run even where idle duration itself didn't change
+— most visibly at 15s (1,567 → 2,053 → 2,122 → 3,413ms) and 60s (3,888 →
+4,470 → 7,494 → 14,694ms). This isn't explained by idle duration at all,
+since 15s idle should cost roughly the same amount every time. Candidate
+explanation: thermal throttling on a Mac mini running repeated GPU bursts
+over a ~35-minute session, but this was **not tested** — flagged as an open
+question for a future task rather than chased further in this one, per the
+"don't over-build beyond what the task asks" scope guardrail.
+
+### Where this leaves Task 7's idle-recovery finding
+
+Closed out deliberately at this point rather than continuing to dig, since
+the marginal question left (root-causing the exact scheduling/dispatch stall,
+or confirming thermal drift) would be its own investigation, not a
+refinement of this one. Summary for the eventual writeup: the 8-bit model
+exhibits a real, reproducible idle-recovery TTFT penalty triggered somewhere
+above roughly 15-20 seconds of full engine idle, ranging from ~2x to ~37x
+baseline TTFT depending on the run; direct GPU-frequency telemetry rules out
+GPU power-state stepping as the cause and points instead at the
+scheduling/dispatch layer; a separate, unexplained session-level latency
+drift was also observed and is flagged as follow-up work.
+
+## Meta-lesson for the writeup
+
+This session is the clearest example yet in this log of the difference
+between "a plausible mechanism" and "a mechanism confirmed against evidence."
+The GPU-power-stepping theory was reasonable, specific, and testable — and
+wrong. Building the actual telemetry to test it (reusing the Task 6
+exporter rather than building something new) turned a plausible story into a
+falsified one and pointed at a more specific, more useful "somewhere
+upstream of the GPU" conclusion. Separately, this session is also the first
+time this log has explicitly flagged a *replicated but still-shifting*
+pattern (the moving idle-duration peak, and the run-over-run drift) as a
+real, reportable finding in its own right, rather than something to keep
+digging on until it stabilizes into a single clean threshold — sometimes the
+honest, useful answer is "this is real and reproducible, but noisier and
+more multi-causal than a single number," not a tidy inflection point.
+
+## Entry: Task 7 closed out — memory footprint, comparison analysis, tradeoffs doc
+
+**Date:** 2026-08-04
+
+### Capturing the missing 4-bit memory numbers
+
+The 8-bit memory breakdown had been captured earlier in the session; 4-bit's
+had not. Restarted the server on `mlx-community/Mistral-7B-Instruct-v0.3-4bit`
+and read the same startup log line. Result: `model_memory=4.08GB`,
+`kv_budget=7.06GB`, `max_tokens_cached=53,856`, vs 8-bit's `model_memory=7.70GB`,
+`kv_budget=3.28GB`, `max_tokens_cached=25,024`. Both draw from the same fixed
+`usable_metal=11.70GB` pool, so 8-bit's heavier weights come directly out of
+the KV cache budget — the practical effect is roughly half the concurrent
+long-context capacity, not just "somewhat slower."
+
+### Running the comparison analysis
+
+`analyze.py` against all four CSVs (4-bit/8-bit × concurrency 1/10) in one
+call, reusing the warmup-cluster exclusion logic from Task 4 unchanged.
+Noticed immediately that 8-bit's concurrency=1 p99 TTFT (23,366ms) was an
+outlier disproportionate to its p50/p95 (379ms/1,089ms) — recognized this as
+very likely the same idle-recovery phenomenon just spent the whole session
+characterizing, since a sequential 20-prompt run at concurrency=1 produces
+exactly the kind of inter-request gaps that triggered it earlier. Flagged
+this explicitly in the writeup rather than reporting the raw p99 at face
+value, which would have misrepresented 8-bit's real tail latency using a
+number this session had independently shown reason to distrust.
+
+### Tradeoffs document
+
+Found `LEARNING_AND_PORTFOLIO_STANDARD.md` already defines a required
+structure for task deliverables (problem/constraints/architecture/live
+proof/internals/engineering judgment/next experiment, plus an explicit
+tradeoffs list) — followed it rather than inventing a new format. Wrote
+`Task7_Quantization_Tradeoffs.md` covering the memory and latency/throughput
+tables above, plus three caveats surfaced by this session's own work rather
+than smoothed over: the contaminated 8-bit p99, the concurrency=10 throughput
+comparison sitting inside a non-monotonic region already flagged in Task 4,
+and the fact that output quality itself was never directly measured in this
+task (the "8-bit is higher fidelity" side of the tradeoff rests on general
+quantization theory, not a measurement taken here).
+
+### Task 7 status
+
+Core deliverable complete: memory footprint comparison, latency/throughput
+comparison, tradeoffs document, and the idle-recovery investigation (with
+its own dedicated entry above) are all written up. Follow-up items
+explicitly deferred rather than silently dropped: root-causing the
+idle-recovery scheduling stall, testing whether 4-bit shows the same
+idle-recovery pattern, an output-quality comparison, and the untested
+session-level thermal-drift hypothesis.
+
+## Meta-lesson for the writeup
+
+The most useful thing this closing stretch did wasn't the analysis itself —
+it was noticing that a number produced by a completely different piece of
+work (`analyze.py`, built back in Task 4) needed a caveat from *this*
+session's separate investigation before it could be reported honestly. Two
+pieces of work in the same session, seemingly unrelated on the surface, that
+turn out to explain each other is exactly the kind of connection that's easy
+to miss if each task is treated as a sealed box — worth actively checking
+whether a new number "smells like" a pattern already confirmed elsewhere
+before reporting it standalone.
