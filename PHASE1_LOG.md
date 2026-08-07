@@ -1314,3 +1314,205 @@ turn out to explain each other is exactly the kind of connection that's easy
 to miss if each task is treated as a sealed box — worth actively checking
 whether a new number "smells like" a pattern already confirmed elsewhere
 before reporting it standalone.
+
+## Entry: Master plan reconciliation — switching to the plan's own Phase 1 numbering, and Item #2 fully closed
+
+**Date:** 2026-08-05/06
+
+### Master plan finally reviewed directly
+
+User supplied the actual plan PDF (`LLM_PE_Master_Plan_v4.pdf`) for the
+first time this session — everything before this point had been
+reconstructed from this log's own "Task N" labels, which turn out **not**
+to be a 1:1 mapping to the plan's own Phase 1 checklist (17 numbered items,
+tier T1 = "do not skip", T2 = "bonus after T1"). Comparing directly against
+the plan surfaced two undone T1 items (item 8: burst test, spike 5→50 with
+recovery-time measurement; item 9: `cost_per_1k_tokens`/`tokens_per_dollar`
++ Grafana cost panel) and six partially-done T1 items (2, 3, 10, 11, 15,
+16), plus three undone T2 items (12, 13, 14: two papers + a prefix-caching
+experiment) and the closing retrospective (17).
+
+Decision, per explicit user direction: use the plan's own item numbers
+going forward, not the "Task N" log labels used up through the Task 7
+entries above. Close every partial item first, then the two net-new T1
+items, then T2 items, then the retrospective — full Phase 1 completion
+before Phase 2 starts, nothing skipped.
+
+### Item #2 (core vLLM parameters) — closed with real evidence for all four flags
+
+- `--max-num-seqs`: already closed in the original Task 2 entry above
+  (`Running:3/Waiting:0` → `Running:1/Waiting:2` evidence).
+- `--gpu-memory-utilization`: redone properly via a predict-then-verify
+  cycle rather than accepted from incidental past logs. Restarted 4-bit at
+  `fraction=0.5`; predicted (correctly, after one self-correction) that
+  `usable_metal` shrinks proportionally but `kv_budget` shrinks by a much
+  larger *relative* amount, since it's what's left after a fixed
+  `model_memory` cost is subtracted from a smaller pool. Verified exactly:
+  `usable_metal=6.36GB` (`12.71×0.5`), `kv_budget=1.57GB`
+  (`6.36−4.08−0.71`), both matching the arithmetic precisely.
+- Follow-up investigation into `overhead`: found and read the actual
+  installed vllm-metal source
+  (`~/.venv-vllm-metal/.../vllm_metal/v1/cache_policy.py` and
+  `model_runner.py`). `overhead` is not a formula or constant — it's
+  measured live every server startup by `profile_run()`, which runs one
+  real dummy forward pass at `max_num_batched_tokens` size and measures how
+  much MLX's buffer cache grows. The function's own docstring confirms this
+  replaced "the historical 800 MB placeholder." Explains why `overhead`
+  varies slightly run-to-run (`0.56GB` / `0.71GB` / `0.71GB` across three
+  separate startups) — real memory telemetry, not a bug or inconsistency.
+- `--tensor-parallel-size`: also grounded in real source
+  (`vllm_metal/platform.py`). Confirmed `NotImplementedError` is raised for
+  `tensor_parallel_size > 1` on Metal, for two stacked reasons stated
+  directly in the code's own comments: a single GPU per Mac (hardware), and
+  no cross-device collective (`mx.distributed`) wired up for this path yet
+  (software — an unbuilt integration, not a fundamental Apple Silicon
+  limitation). The same source file shows dense data-parallelism **is**
+  supported on Metal, but only across multiple Macs each running a full
+  model replica via Ray — a genuinely different topology (replication for
+  throughput, not splitting for capacity/per-request latency). Correctly
+  reasoned through, unprompted, why DP can't solve a
+  doesn't-fit-on-one-GPU problem the way TP/PP can.
+- `--max-model-len`: predicted (correctly) that `kv_budget`/
+  `max_tokens_cached` are independent of this flag (confirmed absent from
+  the `kv_budget` formula in source), and that "Maximum concurrency for N
+  tokens per request" scales inversely with it. Verified via restart at
+  `max-model-len=512`: concurrency ratio landed exactly on
+  `52,704/512=102.94x`; the small deviation in `kv_budget`/
+  `max_tokens_cached` from the 2048-baseline was fully explained by the
+  *already-understood* overhead measurement noise (`0.15GB` difference in
+  overhead ≈ exactly the `72`-block/`1,152`-token shortfall), not by any
+  hidden dependency on `max-model-len`.
+
+### Still open in Phase 1 (plan's own numbering)
+
+Items 3, 10, 11, 15, 16 (remaining partials), 8, 9 (undone T1), 12, 13, 14
+(T2), 17 (retrospective). Session paused here for a terminal restart
+(troubleshooting a `/voice` dictation mic issue after switching headphones
+mid-session, unrelated to the technical work) — next session should resume
+at item #3 (add `gpu_util_pct` to the benchmark harness's own log schema).
+
+## Meta-lesson for the writeup
+
+Redoing `--gpu-memory-utilization` "properly" instead of accepting it as
+already-understood surfaced two genuinely new, source-code-verified facts
+(the live `profile_run()` overhead measurement, and the precise
+TP-rejection reasoning) that hadn't been captured anywhere in this log
+despite the flag having been used correctly for the entire project. Being
+willing to re-open something already "working" and demand real evidence
+for it — not just past behavior that happened to look right — found real,
+previously-undocumented understanding, not just redundant confirmation.
+
+## Entry: Item #3 — `gpu_util_pct` added to the harness's log schema
+
+**Date:** 2026-08-06
+
+### What item #3 asked for
+
+Extend `vllm-benchmark`'s log schema with `gpu_util_pct`, documented since
+Task 3 as a known gap: vLLM has no GPU-utilization metric on Apple Silicon
+(no DCGM equivalent). The Task 6 Grafana work had already solved this exact
+problem once, via `observability/powermetrics_exporter.py` — a sidecar that
+wraps `powermetrics` and re-serves `GPU HW active residency` in Prometheus
+format on its own port (`:9400`). Item #3's job was purely to make the
+*harness* consume that already-existing exporter, not to build new GPU
+monitoring from scratch.
+
+### Session start: two access/environment blockers before any code
+
+Picked up this session cold (new chat, `--resume`, only `PHASE1_LOG.md` and
+`NOTES_PERSONAL.md` as context). Two blockers before real work could start:
+
+- The `vllm-benchmark` repo (a sibling of this one under `~/Documents`, per
+  the Task 3 entry's "new standalone repo" decision) was unreadable from
+  this session — every read/list attempt returned `EPERM`, even with the
+  Bash tool's sandbox explicitly disabled, which confirmed it was a real
+  macOS permission issue (TCC/Full Disk Access) rather than a harness-level
+  sandbox restriction. Resolved by the user granting the terminal app Full
+  Disk Access in System Settings; access started working immediately after,
+  no restart needed.
+- Neither the vLLM server (port 8000) nor the powermetrics exporter (port
+  9400) was running — expected, since nothing survives a terminal/session
+  restart. Verified rather than assumed: `ps aux | grep -i vllm` showed only
+  the `grep` command itself matching, confirming no server process was
+  alive, before starting anything.
+
+### The actual code change
+
+`run_bench.py`'s `scrape_metrics()` previously had its regex dict
+(`METRIC_PATTERNS`) hardcoded as a module-level global — fine for scraping
+one fixed endpoint (vLLM's own `/metrics`), but not reusable for a second
+endpoint with different metric names. Generalized it to accept a `patterns`
+dict as a parameter, added a second pattern set (`GPU_METRIC_PATTERNS`) for
+`powermetrics_gpu_active_residency_percent`, and added a second scrape call
+in `run_one_request()` against a new `--gpu-metrics-url` (default
+`http://localhost:9400/metrics`, skippable via `--no-gpu-metrics`). New
+`gpu_util_pct` field added to `RequestResult`, threaded through to the CSV
+output columns.
+
+One deliberate detail: the new GPU regex pattern was written with the same
+optional-label-group shape as the existing `vllm:` patterns
+(`(\{[^}]*\})?\s+([0-9.eE+-]+)`), even though the exporter's actual output
+has no labels on that line. This keeps the capture-group index (`group(2)`
+= the value) identical across both pattern sets sharing one `scrape_metrics`
+function — avoided a class of bug where a mismatched group index silently
+returns the wrong field instead of an error.
+
+### Verification, not just "it compiles"
+
+`python3 -m py_compile` + `--help` confirmed the new flags exist and the
+file is syntactically valid, but that only proves the code runs, not that
+it does the right thing. Ran a real 3-request benchmark
+(`--concurrency 1 --max-samples 3`) against the live server with the
+exporter also running, and read the actual output CSV: `gpu_util_pct`
+populated with real, varying values (96.92, 98.61, 83.36), not blank or a
+constant.
+
+### Interpreting the real numbers — one self-correction, one confirmed callback
+
+Two questions came up reading the CSV, both worked through via prediction
+first:
+
+- **Why did `gpu_util_pct` jump from the ~6% idle baseline to 83-98%?**
+  First instinct was "cold start" (request `3` in this run did pay the
+  familiar MLX JIT-compile cost, 26,991ms TTFT). Wrong primary explanation,
+  caught by checking the other two rows: requests `1` and `2` were *not*
+  cold-start (716ms/915ms TTFT, normal) and still read 98.61%/83.36% GPU
+  active residency. Corrected conclusion: active residency tracks whether
+  the GPU is doing compute *right now* — generating tokens is
+  compute-heavy work regardless of warmup state — not a one-time warmup
+  signal. Cold start is a separate, additional cost that happened to land
+  on one row in this particular run, not the mechanism behind the metric
+  itself.
+- **Why did `num_requests_running`/`kv_cache_usage_perc` still read `0.0`
+  in the same run, despite the GPU clearly being busy?** This is the exact
+  same finding the Task 3 log entry already confirmed on 2026-08-02 (curled
+  the idle server directly, verified `0.0` was a real reading, not a
+  parsing bug) — recognized as a repeat of an already-confirmed pattern
+  rather than re-investigated from scratch. Precise mechanism: the scrape
+  happens *after* each request completes (see the code comment directly
+  above the scrape call), and at `--concurrency 1` nothing else is ever
+  in flight at that instant by construction — not simply "too few total
+  requests," which was the first-pass framing.
+
+### Docs updated to close out the item cleanly
+
+`vllm-benchmark/README.md`'s "Known limitation: GPU utilization on Apple
+Silicon" section (which described this as an open gap since Task 3) was
+rewritten to describe the resolution: what `gpu_util_pct` is, what has to
+be running for it to be non-`None`, and the graceful-degradation behavior
+if the exporter isn't up. `run_bench.py`'s own module docstring updated to
+match. Item #3 is closed: real code change, real live-server verification,
+documentation brought back in sync with actual behavior.
+
+## Meta-lesson for the writeup
+
+Two different threads from earlier in this log converged cleanly in one
+session: the "verify state directly, don't infer it from a proxy signal"
+discipline (used here to catch the wrong "cold start" hypothesis by
+checking the *other* rows, not just the one that fit the story), and the
+"recognize when a pattern is already confirmed, don't redundantly
+re-investigate" discipline from the concurrency=10 entry (used here to
+correctly identify the `0.0` scheduler fields as the same already-solved
+Task 3 finding instead of opening a new investigation). Neither discipline
+is new to this log, but this is the first entry where both were needed
+back-to-back on two questions raised by the same single CSV.
