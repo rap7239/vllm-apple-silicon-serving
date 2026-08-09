@@ -1747,3 +1747,43 @@ Item #8's own three deliverables (queue buildup, p99 amplification, recovery tim
 ## Meta-lesson for the writeup
 
 The most valuable result of this task wasn't the planned burst-test deliverables — it was catching, through the same verification discipline applied throughout this project (don't accept a plausible-looking result, cross-reference against real server/poller state), that a phenomenon previously scoped as a minor edge case (item #7's idle-recovery, bounded and rare) is actually much larger and more persistent than believed. Two operator mistakes this session (the accidental double-fire of `burst_spike.sh`, the 47-minute away-from-keyboard gap) turned out not to invalidate the findings — they became part of the evidence, because the discipline was to look at what actually happened in the logs rather than assume the intended experiment ran cleanly.
+
+## Entry: Root-causing the async_eval stall — from three vague candidates to `mx.async_eval` → `eval_impl` → `condition_variable::wait`
+
+**Date:** 2026-08-09
+
+### Why this happened tonight, out of order
+
+Item #7's original idle-recovery investigation named three untested candidate upstream causes (Python asyncio event loop, macOS scheduling of an idle process, MLX's lazy dispatch) and was deliberately deferred to after Phase 1 closes. Item #8's burst test escalated the severity of the same phenomenon (unbounded recovery, ≥28 minutes) but the deferral held. Tonight, while gathering a GPU power reading for item #9's cost model, an ad-hoc single `curl` request (not run through any harness) hit the same stall — 95 of ~115 total seconds at idle-level power, ~19 seconds of real compute — proof via a fourth independent signal that the GPU itself does zero work during the stall. Given the strength and immediacy of this evidence, the user made an explicit, informed decision to reopen the investigation immediately rather than wait for the originally-planned deferral point.
+
+### Two-process architecture discovered first
+
+`ps aux` revealed vLLM actually runs as two separate processes communicating over IPC: the API server (asyncio/HTTP layer) and a separate `VLLM::EngineCore` process (scheduling + MLX/Metal dispatch). Both needed independent stack-trace capture.
+
+### `py-spy` — pinning the stall to one exact line
+
+Installed `py-spy` (`brew install py-spy`) and wrote `stall_investigate.sh`: fires a request, then dumps both processes' Python stack traces every 5 seconds for as long as it runs. Result, across 33 consecutive dumps spanning 5.5 minutes (`00:24:05`-`00:29:43`) of a reproduced stall: the `EngineCore` process's MainThread sat at the **exact same line, never moving** — `vllm_metal/v1/model_runner.py:582`, inside `_submit_paged_forward_outputs`. Read the actual source: line 582 is `mx.async_eval(*eval_outputs)`. Despite the "async" name implying non-blocking behavior, the Python thread was blocked inside this call for the entire stall.
+
+### `sample` (native) — a false start caught by checking timestamps, then a clean read
+
+Installed nothing new (macOS's built-in `sample` tool) to capture native C/C++ stack frames beneath the Python call. First attempt (`stall_native_sample.sh`) produced a trace showing MainThread stuck in `PyThread_acquire_lock_timed` — looked plausible, but before trusting it, cross-checked the response file's mtime (`00:51:19`) against the sample report's own timestamp (`01:44:57`) — a 53-minute gap. Root cause: the request had actually finished fast (no stall that run), but a `kill -0`-based liveness check falsely reported it still running (classic zombie-PID race), and `sudo sample` then sat blocked on an expired sudo credential's password prompt for most of an hour before actually running — capturing ordinary idle state, not the stall. Caught and discarded before drawing any conclusion from it, per this project's standing verification discipline.
+
+Fixed the script (`sudo -v` up front to prime credentials; `ps -p` instead of `kill -0` to avoid the zombie race; elapsed-time logging to self-verify future runs) and re-ran. Confirmed valid this time (104s total request, 45s sample fully inside that window). Result, unambiguous — **100% of 38,629 samples across the full 45 seconds**, on MainThread:
+```
+mlx::core::async_eval(...)
+  mlx::core::eval_impl(...)
+    std::condition_variable::wait(...)
+```
+A genuine C++ condition-variable wait inside MLX's own native code (`libmlx.dylib`), not the GIL, not `asyncio`, not a Python-level lock. Combined with the GPU-idle telemetry gathered earlier, this points at `eval_impl` waiting on MLX's own internal worker/stream threads (also observed idling on their own separate condition variables) to actually pick up and dispatch queued work — with the remaining open question being why the OS delays scheduling that worker thread after idle.
+
+### Resolution-plan test: `caffeinate` — ruled out as a simple fix
+
+Proposed a tiered resolution plan (keep-alive mitigation already validated via the warmup-request pattern; a fast `caffeinate` test; upstream bug report; deeper QoS/priority investigation if needed). Restarted the server fresh under `caffeinate -i ./scripts/serve.sh` and repeated the native-sample test against the new PIDs. Result: the stall still occurred (63s total), and the same `async_eval`/`eval_impl`/`condition_variable::wait` mechanism dominated the trace (~91.6% of samples) — **`caffeinate` alone does not fix this.** One minor difference noted honestly: this capture showed more movement through varied `eval_impl` code offsets than the two prior static captures, an ambiguous signal not treated as a win.
+
+### Where this leaves the investigation
+
+Root cause resolved to a specific, evidence-backed mechanism — `mx.async_eval()` blocking inside MLX's native `eval_impl` on a condition variable, most likely waiting on an MLX-internal worker thread that isn't being scheduled promptly by macOS after idle — a dramatically more specific finding than the three vague candidates item #7 started with, though the exact OS-level throttling mechanism remains one layer short of fully confirmed. Practical resolution: the throwaway-warmup-request pattern (already adopted project-wide tonight) remains the one validated mitigation. Next steps, not pursued tonight: check actual thread QoS/priority values directly (Instruments or `taskpolicy`), and file this as a bug report against `vllm-metal`/MLX given the unusually strong evidence trail (GPU power telemetry, Python stack traces, native C++ stack traces, all converging on the same call site).
+
+## Meta-lesson for the writeup
+
+This session is the clearest example yet of taking an already-deferred investigation, reopening it deliberately (not accidentally) when new evidence justified it, and pushing it all the way from three vague hypotheses to one exact line of code and a specific native synchronization primitive — using nothing but tools already available or trivially installable (`py-spy`, `sample`, `caffeinate`), each cross-checked against real timestamps before being trusted. The false-start `sample` capture is worth remembering on its own: a plausible-looking stack trace was caught and discarded specifically because the timestamps didn't add up, not because anything about the trace itself looked wrong — the same "verify against real state" discipline this project has applied to metrics and logs throughout, now applied to profiler output.
