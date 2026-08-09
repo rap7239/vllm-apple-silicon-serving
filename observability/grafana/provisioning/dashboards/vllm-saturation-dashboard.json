@@ -126,6 +126,46 @@
           }
         }
       }
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "Cost per 1K Tokens (Phase 1 item #9)",
+      "description": "cost_per_1k_tokens_usd from the most recently completed run_bench.py --cost-hardware-usd run, via this repo's cost_exporter.py (see PHASE1_LOG.md's item #9 entry for the full formula: amortized hardware price + real electricity from powermetrics_gpu_power_milliwatts, averaged over the whole run's wall-clock duration including idle/queued time -- so a poorly-utilized or stalled run correctly shows up here as worse cost efficiency, not just worse latency). GPU-only power -- see run_bench_cost_file_age_seconds / the underlying JSON's own 'note' field for the stated understatement-of-true-cost caveat.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prometheus-vllm" },
+      "targets": [
+        {
+          "expr": "run_bench_cost_per_1k_tokens_usd",
+          "legendFormat": "{{variant}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 6
+        }
+      }
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "Tokens per Dollar (Phase 1 item #9)",
+      "description": "tokens_per_dollar -- the inverse framing of the same cost figure, from cost_exporter.py. Watch this alongside the async_eval stall investigation (PHASE1_LOG.md, 2026-08-09 entries): a live demonstration run showed ~3.6x worse tokens/$ when the stall hit versus a clean run of the identical 10 requests.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prometheus-vllm" },
+      "targets": [
+        {
+          "expr": "run_bench_tokens_per_dollar",
+          "legendFormat": "{{variant}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 1
+        }
+      }
     }
   ]
 }

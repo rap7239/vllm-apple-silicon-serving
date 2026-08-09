@@ -27,6 +27,18 @@ scrape_configs:
         labels:
           service: "powermetrics"
 
+  # Cost model exporter (this repo's cost_exporter.py, Phase 1 item #9).
+  # Bridges run_bench.py's one-shot {variant}_cost.json output files (not
+  # directly scrapeable -- run_bench.py exits after each run) into a
+  # continuously-servable Prometheus endpoint showing the latest completed
+  # run's cost_per_1k_tokens_usd / tokens_per_dollar figures.
+  - job_name: "cost_exporter"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:9500"]
+        labels:
+          service: "cost"
+
   # Prometheus scraping itself -- standard practice, useful for confirming
   # the stack itself is healthy independent of vLLM/exporter state.
   - job_name: "prometheus"
