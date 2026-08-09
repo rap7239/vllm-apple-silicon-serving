@@ -1801,3 +1801,30 @@ Picked back up where item #9 was paused (formula designed by hand, code not yet 
 Also wrote a standalone math reference (`INTERVIEW_PREP.md`) at the user's request, framed explicitly for re-derivation practice before an interview rather than narrative recall — the user described their own learning style as preferring to keep re-working mathematical logic from scratch rather than just remembering a story about it.
 
 **Still open:** a clean (non-stalled) comparison run, to quantify precisely how much the stall costs in dollar terms versus a smooth run at the same concurrency; wiring the cost summary into a Grafana panel per the master plan's own spec.
+
+## Entry: Item #9 closed — clean-vs-stalled cost comparison, wired into Grafana
+
+**Date:** 2026-08-09 (same day, later)
+
+### Clean-vs-stalled comparison run
+
+Fixed the prior run's contamination by combining warmup and real test into one script with zero gap between them, and — importantly — firing the warmup at the *same* concurrency (5) as the real test, not just concurrency=1. This confirmed a real refinement to the warmup pattern: a single-slot warmup does not necessarily protect a different concurrency level's first batch; the warmup needs to match. Result, same 10 prompts both times:
+
+| | Stalled run | Clean run |
+|---|---|---|
+| `$/1K tokens` | $0.005004 | $0.001394 |
+| tokens/$ | 199,850.9 | 717,383.1 |
+| avg GPU power | 3.69W | 12.73W |
+| run duration | 251.1s | 68.7s |
+
+The stalled run cost ~3.6x more per token — a genuinely concrete, defensible dollar figure for what had previously only been characterized as a latency curiosity. Counterintuitive detail worth remembering: the *clean* run shows *higher* average power, not lower — average power reflects duty cycle (fraction of wall-clock time spent actively computing), and the stalled run's much longer duration was mostly spent at near-idle power, dragging its average down even though its total dollar cost was higher.
+
+### Wired into Grafana
+
+Built `observability/cost_exporter.py`: since `run_bench.py` is a one-shot CLI script (not a continuously running server), its `{variant}_cost.json` output isn't directly scrapeable by Prometheus. The exporter bridges this by finding the most recently modified `*_cost.json` in `vllm-benchmark/runs/` on every scrape and re-serving its fields as Prometheus gauges (`run_bench_cost_per_1k_tokens_usd`, `run_bench_tokens_per_dollar`, plus supporting fields), labeled by `variant`. No sudo needed (unlike `powermetrics_exporter.py`) since it's just reading a small JSON file, not wrapping a privileged system tool.
+
+Added as a new Prometheus scrape target (`observability/prometheus.yml`) and two new `stat`-type panels (not `timeseries`, since this is inherently "the latest completed run's figure," not a continuous stream) to the existing dashboard (`vllm-saturation-dashboard.json`), matching the established 2-column layout. Verified the full chain end to end before trusting it visually: exporter's own `/metrics` output → Prometheus's `/api/v1/query` returning the exact same value → confirmed rendering correctly in the Grafana UI. `docker-compose`'s existing bind-mount for `prometheus.yml` meant the config change took effect on a plain container restart, no image rebuild needed.
+
+### Item #9 — CLOSED
+
+All three of the master plan's asks are done: `cost_per_1k_tokens`/`tokens_per_dollar` added to benchmark outputs, real numbers validated against a live clean-vs-stalled comparison, wired into a Grafana cost-efficiency panel.
