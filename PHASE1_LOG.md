@@ -1516,3 +1516,234 @@ correctly identify the `0.0` scheduler fields as the same already-solved
 Task 3 finding instead of opening a new investigation). Neither discipline
 is new to this log, but this is the first entry where both were needed
 back-to-back on two questions raised by the same single CSV.
+
+## Entry: Item #2 — full hands-on redo, plus a prefix-caching and tensor/pipeline-parallelism detour
+
+**Date:** 2026-08-07
+
+### Why this session happened at all
+
+Picked back up after a session restart (unrelated audio/dictation issue),
+with an explicit concern that the depth built up in earlier sessions had
+gone "foggy" after moving from a different Claude surface to Claude Code —
+even with `PHASE1_LOG.md` and `NOTES_PERSONAL.md` available to read, the
+understanding itself hadn't transferred just from re-reading notes about
+it. Decision: redo all four item #2 flags from scratch via predict-then-
+verify, live against the actual running server, rather than accept the
+existing "closed" status at face value. A second, deliberate change this
+session: the user drove every terminal command personally from this point
+on, with Claude predicting/guiding/verifying rather than executing
+directly — a working-style change, not just a content redo.
+
+### Two infrastructure bugs hit before any flag testing could start
+
+- **Backgrounding a server inside a monitored bash call is fragile.**
+  First restart attempt launched `serve.sh` with `&` inside the same tool
+  call that also ran a polling loop waiting for it to become ready. When
+  the polling loop hit its own timeout, the entire process group —
+  including the backgrounded server — was killed with it, mid-boot.
+  Fixed by fully detaching the server (`nohup ... & disown`) in its own
+  call, separate from any monitoring loop.
+- **Long paths break when pasted into a wrapped terminal.** Commands built
+  around the session's long scratchpad path repeatedly got mangled on
+  paste — a multi-line wrap turned one path into three broken shell
+  tokens, and a `curl` command's quotes were similarly split across wrapped
+  lines, sending empty headers and a 400 from the server. Root cause both
+  times was terminal line-wrapping, not the commands themselves. Fixed by
+  writing throwaway helper scripts (`fire_requests.sh`,
+  `fire_diverse_prompts.sh`, `fire_boundary_test.sh`, `tp_test.sh`) to the
+  repo root and a short `serve.log` symlink pointing at the real log file
+  in scratchpad, so every command actually typed or run was short enough
+  to survive a terminal wrap.
+
+### `--max-num-seqs` — re-confirmed live, plus a real gap in the first attempt
+
+Restarted with `MAX_NUM_SEQS=1`, fired 3 concurrent requests, watched
+`Running:`/`Waiting:` live via `tail -f`. First attempt reproduced the
+exact same limitation the original Task 2 entry hit: with `max_tokens=60`,
+requests finished faster than the server's ~10s periodic status tick, so
+the log only ever showed `Running:1/Waiting:1`, never the expected
+`Running:1/Waiting:2`. Re-ran with `max_tokens=400` (same fix as the
+original entry) and got the clean sequence live in the user's own
+terminal: `Running:1/Waiting:2` → `Running:1/Waiting:1` →
+`Running:1/Waiting:0`, `Running` never once leaving 1 across the full run.
+
+A second, smaller version of the same timing gap resurfaced later in the
+session (see prefix-caching section below) — caught independently by the
+user rather than assumed away, confirmed by reading the raw log's request-
+completion line against the first status tick's timestamp rather than
+guessing.
+
+### Detour: prefix caching is block-granular, proven with a wrong prediction first
+
+A side question ("would 3 completely different prompts still show a
+nonzero prefix-cache hit rate, since they all go through the same chat
+template wrapper?") turned into its own small experiment. Predicted
+result: "way more than small," nonzero. Actual result, on a fresh-restart
+server: a flat **0.0%** across the entire run.
+
+Rather than accept an approximate explanation, used vLLM's own
+`/tokenize` endpoint to get exact token counts instead of guessing from
+word counts. Confirmed the server's own boot log already states
+`block_size=16` (`cache_policy.py:846`) — prefix-cache hits require an
+entire 16-token block to match exactly from position 0, not a partial or
+approximate match. The shared chat-template wrapper alone is only ~3
+tokens (`<s>[INST] `), nowhere near enough to fill one block before the
+three prompts' actual content diverges — hence the flat 0%.
+
+Built a second, precisely-engineered test to prove the mechanism
+positively rather than just negatively: used `/tokenize` iteratively to
+find a shared-prefix sentence landing at exactly 18 tokens before the
+divergent ending word (comfortably past the 16-token boundary), then fired
+3 requests sharing that prefix with different one-word endings ("cats",
+"dogs", "birds"). Result: hit rate climbed from 0.0% baseline to **38.1%,
+then 50.8%** — exactly the shape predicted (request 1 pays 0% since
+nothing is cached yet; requests 2 and 3 reuse the now-cached first block).
+
+Caught one more real gap mid-experiment: the log skipped from
+`Waiting:1` straight to `Waiting:0`, missing the expected `Waiting:2`
+moment. Traced directly in the raw log file: a request's `200 OK` line
+appeared *before* the first periodic status tick fired — same root cause
+as the `--max-num-seqs` timing gap above (short `max_tokens=200` here,
+combined with the cache hit skipping some prefill work, made the request
+fast enough to finish before the first ~10s tick).
+
+### `--tensor-parallel-size` — live error, then real source, then a genuine correction mid-explanation
+
+Predicted correctly at the PM level (capacity problem, splits weights
+across GPUs rather than replicating). Triggered the real error live via a
+direct `vllm serve --tensor-parallel-size 2` invocation (not wired into
+`serve.sh`): `NotImplementedError` at config-validation time, before the
+model even loads. Read the actual source
+(`vllm_metal/platform.py:480-494`) rather than trusting the error message
+alone — confirmed the two stacked reasons already documented in the
+2026-08-05/06 entry (no cross-device collective wired up, and one GPU per
+Mac to begin with), and found a new detail this pass: pipeline parallelism
+**is** supported on Metal, using simple point-to-point `mx.distributed`
+send/recv between stages rather than the collective all-reduce TP would
+need.
+
+Explaining PP conceptually surfaced a real gap, caught by a direct
+question rather than self-review: the first explanation only described
+PP's single-request behavior (one worker idle waiting for a handoff),
+which implies almost no parallelism at all. Corrected: PP is only
+genuinely parallel across a *continuous stream* of many requests, each
+pipeline stage busy on a *different* request simultaneously (assembly-
+line style) — for one isolated request it's close to sequential plus
+handoff overhead. Also clarified, on request: PP as an algorithm is
+platform-agnostic (used on CUDA clusters and TPU pods long before Metal
+existed); only the transport is platform-specific (NCCL/NVLink on CUDA
+vs. `mx.distributed` here).
+
+### `--max-model-len` — confirmed independent of `kv_budget`, exact 4x math
+
+Predicted, this time correctly on the first try, that `kv_budget` and
+`max_tokens_cached` would be unaffected by `--max-model-len`, and that
+concurrency would scale inversely. Restarted at `max-model-len=512`:
+`kv_budget=6.91GB`, `max_tokens_cached=52704` — identical, digit for
+digit, to the `2048` baseline captured earlier in this same session.
+vLLM's own boot log confirmed the concurrency math directly:
+`Maximum concurrency for 512 tokens per request: 102.94x`, versus
+`25.73x` at `2048` — exactly a 4.0x ratio, matching the 4x reduction in
+`--max-model-len` (2048→512) exactly.
+
+One real communication gap surfaced here too: stating "`--max-model-len`
+doesn't touch the KV budget" and "there's a 4x impact" back-to-back,
+without flagging that those two sentences describe two *different*
+quantities (the fixed-size pool vs. how many requests share it), read as
+contradictory. Resolved by writing out the full four-step formula
+explicitly (`usable_metal` → `kv_budget` → `max_tokens_cached` →
+`concurrency = max_tokens_cached / max_model_len`) and pointing at the
+exact step where the flag enters — the last one only. Worth remembering
+for the eventual writeup: when a "doesn't affect X, but does affect Y"
+claim lands as confusing, the fix is usually to separate X and Y
+explicitly with real numbers, not to re-explain the same claim differently.
+
+## Meta-lesson for the writeup
+
+This session's most reusable lesson isn't new technical content — it's
+that redoing already-"closed" material hands-on, with the learner driving
+instead of the assistant, surfaced real gaps that passive review of the
+same notes had not: a wrong prediction on prefix caching that led to a
+precisely-engineered follow-up test, an incomplete pipeline-parallelism
+explanation caught by a sharp question rather than self-correction, and a
+confusing "doesn't affect X but affects Y" explanation that only got fixed
+once separated into explicit, numbered steps. None of these were
+mistakes in the underlying technical facts (item #2 was already correctly
+closed in the 2026-08-05/06 entry) — they were gaps in how clearly that
+understanding could be *reconstructed and re-explained from scratch*,
+which is a different and arguably more interview-relevant skill than
+having gotten it right once.
+
+## Entry: Item #10 — PagedAttention + continuous batching (conceptual, with live verification)
+
+**Date:** 2026-08-07
+
+Worked through both halves of item #10 via predict-then-verify, with the user driving articulation and me pushing back on gaps rather than lecturing.
+
+**PagedAttention.** Landed correctly on the two distinct failure modes non-paged KV cache allocation has: internal fragmentation (reserving each sequence's cache to `max_model_len` upfront wastes the entire unused tail for sequences that finish early) and external fragmentation (even sizing to current length, a growing sequence can be blocked by a neighbor sitting in adjacent physical memory, even with free memory elsewhere in the pool). PagedAttention's fix — fixed-size blocks (`block_size=16`, confirmed from this server's own boot log in the item #2 prefix-caching detour) plus a per-sequence block table decoupling logical from physical placement — solves both: on-demand block allocation bounds internal-fragmentation waste to under one block, and non-contiguous physical placement removes the adjacency constraint that causes external fragmentation.
+
+**Continuous batching — live test, three iterations before the signature was actually observable.** Predicted correctly that static batching gates refills on the *whole* batch finishing, while continuous batching (iteration-level scheduling) refills a freed slot immediately. Verifying this live took three attempts, each failing for a distinct, diagnosable reason — a useful sequence in its own right:
+1. First attempt used the server's own periodic log line (`tail -f`, ~10s tick). Result: only 3 log lines total, first one already showing `Running:2/Waiting:0` — the entire fire→short-finish→refill cycle happened inside the ~10s gap between ticks. Same root cause as two earlier timing gaps in this project (the original `--max-num-seqs` test, and the prefix-caching detour) — periodic print interval too coarse for fast requests.
+2. Second attempt polled vLLM's `/metrics` Prometheus gauges (`vllm:num_requests_running`, `vllm:num_requests_waiting`) directly at 0.2s intervals instead of relying on the log's internal print timer. This produced a real transition but skipped the expected middle state (`Running:2/Waiting:0`) — went straight from `Running:2/Waiting:1` to `Running:1/Waiting:0`. Root cause, reasoned out before re-running: the two requests given identical `max_tokens=250` were processed in the same continuous-batching decode loop, one token per step for every running request together — so they likely hit their token cap on the *same* decode step, meaning the intermediate state may have had a true duration near zero, not just been under-sampled.
+3. Third attempt used three deliberately distinct token budgets (150/450/900) so no matter which two requests happened to be admitted first, they couldn't tie. Result: a clean, fully-resolved four-state trace — `Running:2/Waiting:1` (11s) → `Running:2/Waiting:0` (held 3s) → `Running:1/Waiting:0` (6s) → `Running:0/Waiting:0`. The 3-second hold on the middle state is the actual proof: `Waiting` dropped to 0 a full 9+ seconds before `Running` reached 0, meaning the queued request was serviced without waiting for its original batch-mates to fully drain — the one behavior a static-batching scheduler could not produce (static batching would hold `Waiting` at 1 until `Running` also hits 0 simultaneously).
+
+Helper scripts written to repo root for this: `fire_batching_test.sh` (concurrent curl firer, three iterations of tuned `max_tokens`), `poll_batching.sh` (0.2s `/metrics` poller, prints only on state change).
+
+## Entry: Revisit session — items #3, #4, #7 re-derived hands-on (predict-then-verify)
+
+**Date:** 2026-08-08
+
+Following item #10's redo methodology, extended the same predict-then-verify articulation drill to three already-"closed" items whose understanding hadn't stuck: #3 (harness log-schema extension), #4 (saturation curve / `queue_wait_ms` bug), #7 (4-bit vs 8-bit quantization + idle-recovery investigation). Explicit reason given: earlier sessions on this material had Claude executing directly while the user "blindly" ran commands — the working-style change (user drives the terminal, effective from item #2's 2026-08-07 redo) was meant to fix exactly this, but items #3/#4/#7 predated that change and hadn't been redone since.
+
+**Numbering ambiguity resolved before starting.** This repo has two parallel item-numbering schemes — old ad-hoc "Task N" labels vs. the master plan's own Phase 1 item numbers 1-17 — which don't map 1:1 (old Task 3 = harness-build broadly; new item #3 = specifically the `gpu_util_pct` schema extension). Installed `poppler` (`brew install poppler`) to actually read the master plan PDF's Phase 1 task table rather than guess: item #4 = old Task 4 (saturation curve) and item #7 = old Task 7 (quantization) do coincide 1:1; item #3 does not map to old Task 3.
+
+**Item #3 (harness log schema).** Rebuilt the TPOT-vs-ITL distinction via a numeric example (99×20ms + one 500ms outlier token), establishing that percentiles must be taken of the right underlying data — p99 of ITL (raw per-token gaps) surfaces a single-token spike; p99 of TPOT (already-averaged per request) doesn't, since averaging erases the spike before any percentile runs. Connected `queue_depth` and `kv_cache_used_pct` directly to data already watched live in the item #10 session (the `Waiting:` count and `GPU KV cache usage: X%` log field) rather than introducing them as new abstractions. Quick pass on the DCGM-substitute story: no DCGM on Apple Silicon; `powermetrics_exporter.py` sidecar built as a from-scratch translator into Prometheus format; `run_bench.py`'s `scrape_metrics()` generalized to scrape both vLLM's own `/metrics` and the exporter's `:9400/metrics`.
+
+**Item #4 (saturation curve) — retold, then reproduced live.** Retold the four-bug story (thin dataset → `--repeat` → real 15-prompt merge; the `s10` 36,948ms harness queue-wait leak; the real ~22s batched-path warmup at concurrency=5; the final flat-through-25-then-bends-at-50 finding) as narrative, then reproduced the core diagnostic live against the real running server and harness (`~/Documents/vllm-benchmark/scripts/run_bench.py`), restarted without the `--max-num-seqs` cap left over from item #10's testing to avoid confounding harness-side queueing with server-side capacity queueing. Real reproduction (`runs/refresher_c1.csv`, concurrency=1, 8 requests): `queue_wait_ms` climbed cleanly across requests 2-8 (52,100ms → 148,373ms) while their real `ttft_ms` stayed small (955-3,126ms) — the exact 2026-08-02 mechanism, live. Bonus, unplanned finding: the very first request (`s2`) showed a genuine 40,830ms TTFT with near-zero `queue_wait_ms` — correctly diagnosed live, unprompted, as a cold-start/JIT-compile cost (server had just been freshly restarted), applying the `queue_wait_ms`-first diagnostic rule just re-derived for item #3. Confirmed the dataset's `s`-prefix naming convention directly from `datasets/prompts.jsonl` (`s1`-`s15` = the 15 merged support prompts; `1`-`5` = the original synthetic set) rather than guessing — same file, coincidentally, as the original `s10` incident. Hit two environment snags along the way (system `python3` missing `httpx` — fixed by pointing at the repo's own `venv`; a wrapped multi-flag command splitting `--variant refresher_c5` into two shell tokens — fixed the same way as the item #10 session, by writing short throwaway scripts, `run_c1.sh`/`run_c5.sh`, instead of long inline commands).
+
+**Item #7 (4-bit vs 8-bit MLX quantization + idle-recovery).** Rebuilt the core tradeoff from `Task7_Quantization_Tradeoffs.md`'s real numbers (model_memory 4.08GB vs 7.70GB; kv_budget 7.06GB vs 3.28GB; max concurrency 26.3x vs 12.2x; TPOT 65.9ms vs 104.7ms) rather than the generic "8-bit is higher quality" framing — flagged that output quality was never actually measured in this project (no perplexity/eval harness run), an intentional, documented gap rather than an oversight. Explained the TPOT gap via decode's memory-bandwidth-bound nature (half the weight bytes → roughly half the per-token time), connecting to the master plan's own Phase 7 preview material. Retold the idle-recovery investigation in full: the anomaly that didn't fit prior warmup stories, the mystery-traffic confound (later found to be Prometheus, not Grafana, still scraping the server directly), the four replicated sweeps showing a real-but-shifting penalty (no fixed idle-duration threshold), and the GPU-power-stepping hypothesis tested directly with real frequency telemetry and disproved (GPU sits flat at idle baseline for 25+ of 28 seconds, then snaps to full frequency in ~1 second right at token delivery — ruling out the GPU itself and pointing upstream, to an as-yet-unidentified scheduling/dispatch-layer stall). Root-causing that upstream stall was explicitly deferred as backlog, to be picked up after Phase 1 closes, rather than opened as new work mid-revisit-session.
+
+## Meta-lesson for the writeup
+
+Same core finding as item #10's redo, now confirmed across three more items: material that was correctly closed the first time can still fail to be *retained* if it was executed by Claude rather than driven by the learner. The specific gaps this session surfaced weren't in the original technical conclusions (all of which held up under live re-verification) but in recall and re-explanation from scratch — plus one genuinely new, unplanned confirmation live in the data itself (the `s2` cold-start artifact), a good reminder that hands-on redos don't just refresh memory, they can still turn up real, previously-unseen instances of already-understood phenomena.
+
+## Entry: Item #8 — burst test (spike 5→50), and a much larger version of item #7's open mystery
+
+**Date:** 2026-08-08
+
+### Design
+
+Three-phase test against `~/Documents/vllm-benchmark/scripts/run_bench.py`: baseline (`--concurrency 5`, 10 requests), burst (`--concurrency 50`, all 50 fired at once, not ramped), recovery (24 single-request canary probes, 5s apart, same fixed prompt each time). A continuous poller (`burst_poller.sh`, rewritten mid-session after the first version died under load — see below) logged `vllm:num_requests_running`, `vllm:num_requests_waiting`, `vllm:kv_cache_usage_perc`, and GPU frequency (via the item #3/#6 `powermetrics_exporter.py` sidecar) once per second throughout.
+
+### Discovery #1 — a new, sharper version of a first-batch stall, found before real testing could even start
+
+Two consecutive baseline attempts both showed the *entire first batch* of admitted requests (matching whatever `--concurrency` was set to) stall uniformly for tens of seconds — 66,919-66,932ms across 5 requests in one run, 49,913-49,920ms across 5 in another, `queue_wait_ms` near-zero both times (ruling out a harness artifact). Critically, the second occurrence came only ~8.5 minutes after the first, breaking a pure idle-duration explanation (item #7's original finding needed at least 15-20s and was characterized up to 60s; a mundane 47-minute away-from-keyboard gap explained the very first occurrence, but 8.5 minutes clearly did not). Pattern across all observations today (including item #4's `s2` earlier): **the first batch of concurrent requests in any fresh `run_bench.py` process invocation incurs this stall, regardless of prior idle duration.** Worked around with a throwaway single-request warmup fired immediately before every real measurement (`burst_baseline.sh`, `burst_spike.sh` both updated to do this) — confirmed effective: the warmup absorbs the stall itself, and the real measurement immediately after comes back clean.
+
+### Discovery #2 — the clean burst itself: moderate amplification, and a scoping gap
+
+Once warmed, the real 50-request burst showed TTFT amplification from a 609-1,334ms baseline to a tight 4,395-4,700ms cluster (~3.5-4x) — real but moderate, consistent with operating over the ~25-request comfortable ceiling established in item #4. `kv_cache_usage_perc` only reached ~11-14% at peak, nowhere near its ceiling — because these test prompts are short relative to `max_model_len`, this particular burst design never actually exercised memory-based admission control the way a burst of longer-context requests would. Flagged as a real scoping limitation of this test, not glossed over: a future version testing near-max-length prompts would more directly stress `kv_cache_usage_perc` and could show real queueing (`Waiting > 0`) that this run never triggered.
+
+### Discovery #3 — mid-burst, a live instance of item #7's exact signature
+
+TTFT looked fine, but full completion of all 50 requests took over 4 minutes (the scheduler's `Running` count didn't return to 0 until ~4 minutes after the burst started) — TTFT and total completion time are very different things. During the tail of that drain, GPU frequency repeatedly dropped to idle baseline (789-790 MHz) for 70-90 second stretches while 25-36 requests were still marked `Running`. Verified this isn't consistent with "slowly grinding through decode under contention" (which would keep the GPU busy, just producing less aggregate throughput) — sustained idle frequency while requests are nominally in-flight is the same signature item #7 already characterized and ruled the GPU itself out for. New here: it can happen **mid-burst**, affecting a large in-progress batch, not just a single fresh connection.
+
+### Discovery #4 — the headline finding: recovery never completed in 28 minutes
+
+Caveat stated plainly: due to an operator mix-up, `burst_spike.sh` was accidentally run twice back-to-back (the second run showed TTFT ~10,380-10,412ms, roughly 2.2x worse than the first clean run — itself a notable data point about compounding load) before the recovery phase began. So what got measured was recovery after **two** consecutive 50-request bursts, not an isolated single burst — an honest scoping note for the record, not hidden.
+
+Across 24 canary probes over ~28 minutes, TTFT never returned to baseline. Every probe measured between 20,825ms and 115,626ms (20x-115x baseline), no clear downward trend — if anything, the two worst readings (109,525ms, 115,626ms) came in the second half of the test. Probe 20 didn't just get slow, it hit a genuine `httpx.ReadTimeout` after 121.3 seconds of waiting (`queue_wait_ms=0.07ms`, `connect_wait_ms=961ms` — both normal, confirming this is 100% a server/upstream delay, not a harness artifact).
+
+Cross-referencing the poller against each probe's real TTFT confirmed the mechanism directly: `Running:1` only ever appeared for ~2-4 seconds right before each probe finished, regardless of whether that probe's total TTFT was 20 seconds or 115 seconds. The overwhelming majority of every probe's delay happened in a phase where vLLM's own scheduler hadn't even admitted the request yet — the same "something upstream of the GPU/scheduler" conclusion item #7 reached, now shown to persist continuously for at least 28 minutes after real burst load, not just as a short blip after a controlled idle wait.
+
+### Second infrastructure bug found and fixed mid-session
+
+The first version of `burst_poller.sh` used `set -euo pipefail`; under load, a transient scrape failure (the exporter's 1s timeout being exceeded, or `grep` finding zero matches) caused `set -e` to kill the whole polling loop silently, mid-burst. Rewrote without `-e`/`pipefail`, with explicit `${var:-n/a}` fallbacks after every fetch, so the loop survives transient failures and logs `n/a` instead of dying.
+
+### Where this leaves item #8 and the backlog
+
+Item #8's own three deliverables (queue buildup, p99 amplification, recovery time) are answered, honestly: queue buildup wasn't observed the way expected (short prompts didn't stress KV capacity); p99 amplification was moderate (~3.5-4x) once the unrelated first-batch stall was controlled for; recovery time is the real story — **unbounded within the 28 minutes tested**, not a clean number. This substantially raises the stakes on item #7's already-deferred root-cause investigation: what looked like a minor, bounded (2x-37x, tested only to 60s idle) cold-start quirk there turns out to be capable of persisting for at least 28 minutes after real burst load. Still deliberately deferred per the earlier backlog decision — not reopened mid-item-8 — but now flagged as the single most operationally important open question in this project's Phase 1 work: a production system hitting this after a real traffic spike could be degraded for a very long time, not just briefly.
+
+## Meta-lesson for the writeup
+
+The most valuable result of this task wasn't the planned burst-test deliverables — it was catching, through the same verification discipline applied throughout this project (don't accept a plausible-looking result, cross-reference against real server/poller state), that a phenomenon previously scoped as a minor edge case (item #7's idle-recovery, bounded and rare) is actually much larger and more persistent than believed. Two operator mistakes this session (the accidental double-fire of `burst_spike.sh`, the 47-minute away-from-keyboard gap) turned out not to invalidate the findings — they became part of the evidence, because the discipline was to look at what actually happened in the logs rather than assume the intended experiment ran cleanly.

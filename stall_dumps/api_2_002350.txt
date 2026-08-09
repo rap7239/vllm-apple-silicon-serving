@@ -1,0 +1,29 @@
+Process 64114: /opt/homebrew/Cellar/python@3.12/3.12.12_2/Frameworks/Python.framework/Versions/3.12/Resources/Python.app/Contents/MacOS/Python /Users/rahulpunde/.venv-vllm-metal/bin/vllm serve mlx-community/Mistral-7B-Instruct-v0.3-4bit --dtype auto --host 127.0.0.1 --port 8000 --api-key local-vllm-key --max-model-len 2048
+Python v3.12.12 (/opt/homebrew/Cellar/python@3.12/3.12.12_2/Frameworks/Python.framework/Versions/3.12/Resources/Python.app/Contents/MacOS/Python)
+
+Thread 0x1FCAAA180 (active): "MainThread"
+    run (asyncio/runners.py:118)
+    run (asyncio/runners.py:195)
+    run (uvloop/__init__.py:96)
+    cmd (vllm/entrypoints/cli/serve.py:148)
+    main (vllm/entrypoints/cli/main.py:95)
+    <module> (vllm:10)
+Thread 0x16CF1F000 (idle): "MPClientEngineMonitor"
+    select (selectors.py:415)
+    wait (multiprocessing/connection.py:1136)
+    monitor_engine_liveness (vllm/v1/engine/utils.py:229)
+    monitor_engine_cores (vllm/v1/engine/core_client.py:697)
+    run (threading.py:1012)
+    _bootstrap_inner (threading.py:1075)
+    _bootstrap (threading.py:1032)
+Thread 0x16DF2B000 (active): "ThreadPoolExecutor-2_0"
+    _worker (concurrent/futures/thread.py:90)
+    run (threading.py:1012)
+    _bootstrap_inner (threading.py:1075)
+    _bootstrap (threading.py:1032)
+Thread 0x1713BB000 (idle): "AnyIO worker thread"
+    wait (threading.py:355)
+    get (queue.py:171)
+    run (anyio/_backends/_asyncio.py:1022)
+    _bootstrap_inner (threading.py:1075)
+    _bootstrap (threading.py:1032)
