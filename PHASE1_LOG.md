@@ -1828,3 +1828,19 @@ Added as a new Prometheus scrape target (`observability/prometheus.yml`) and two
 ### Item #9 — CLOSED
 
 All three of the master plan's asks are done: `cost_per_1k_tokens`/`tokens_per_dollar` added to benchmark outputs, real numbers validated against a live clean-vs-stalled comparison, wired into a Grafana cost-efficiency panel.
+
+## Entry: Item #11 — streaming API (SSE vs WebSocket vs HTTP), TTFT/TPOT streaming-vs-batch — CLOSED
+
+**Date:** 2026-08-09 (same day, later)
+
+Conceptual item, no live server experiments — worked through via predict-then-verify, anchored directly to the SSE mechanics already exercised hands-on all session (`run_bench.py`'s own `stream=True` chunk parsing).
+
+**Non-streaming collapse, derived rather than stated.** Predicted correctly, unprompted, that non-streaming TTFT would be "much higher" — refined to the precise version: TTFT doesn't get worse, it stops existing as a separate concept and becomes numerically identical to `total_ms`, since the client observes exactly one arrival event (the whole response, at once). Correctly reasoned that the underlying GPU compute is unaffected by the streaming/non-streaming choice (a transport decision, not a compute decision) when asked to disambiguate two different questions hiding inside "does TPOT change" — but needed the explicit split to separate "does generation speed change" (no) from "can you still measure per-token gaps without streaming" (no, for a structurally different reason — zero observed arrival events, not merely a harder computation). Correctly derived that only a coarse `total_output_tokens / total_ms` average survives non-streaming, and — unprompted — connected this to item #3's own TPOT-vs-ITL masking lesson: same blind spot, new context.
+
+**Perceived vs. actual latency, self-derived.** Correctly identified, without being led there, that streaming's real value is UX-only — total processing time can be identical either way, what changes is when a human perceives progress starting. This is the direct justification for why TTFT (not total time) is the metric most interactive-workload SLAs are built around.
+
+**SSE vs WebSocket — one real terminology catch.** Initial reasoning for "why not WebSocket" invoked "token saving" — conflated LLM output tokens (this project's specific, load-bearing meaning of that word throughout) with network-level message/frame count. Corrected explicitly: protocol choice has zero effect on how many LLM tokens get generated; the real reasons SSE wins for this use case are infrastructure compatibility (SSE rides on plain HTTP, transparent to existing proxies/gateways; WebSocket needs every intermediary to support the upgrade), free built-in reconnection (`EventSource`), and architectural fit (one request → one long-lived response matches vLLM's own per-request async handling, versus WebSocket's separate bidirectional session lifecycle solving a problem this one-shot prompt-in/response-out pattern doesn't have).
+
+### Item #11 — CLOSED
+
+Master plan's ask (understand SSE vs WebSocket vs HTTP, and how TTFT/TPOT differ streaming vs batch) fully covered conceptually, with the streaming-vs-batch half directly grounded in this project's own already-built instrumentation rather than abstract theory.
