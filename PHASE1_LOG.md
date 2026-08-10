@@ -1844,3 +1844,19 @@ Conceptual item, no live server experiments — worked through via predict-then-
 ### Item #11 — CLOSED
 
 Master plan's ask (understand SSE vs WebSocket vs HTTP, and how TTFT/TPOT differ streaming vs batch) fully covered conceptually, with the streaming-vs-batch half directly grounded in this project's own already-built instrumentation rather than abstract theory.
+
+## Entry: async_eval stall — QoS confirmation attempted, hit a real tooling wall
+
+**Date:** 2026-08-09 (same day, later, resuming the deferred investigation now that #9 and #11 are both closed)
+
+With Phase 1's remaining substantial items done, resumed the async_eval investigation to try to confirm the last open link: whether macOS is genuinely delaying scheduling of an MLX-internal worker thread after idle, the leading explanation for the `condition_variable::wait` found last night.
+
+Tried two terminal-accessible tools, both inconclusive for this specific question:
+- `powermetrics --samplers tasks -i 1000 -n 1`: real output, but its columns (`Name, ID, CPU ms/s, User%, Deadlines, Wakeups`) have no QoS class field at all — wrong sampler for this question, even though it's the right one for GPU power. Also notable: `EngineCore` (PID 48069) didn't appear in the "Running tasks" list at all during this idle sample — consistent with everything found so far (it's doing close to zero measurable work), but not itself new evidence.
+- Re-examined `ps aux`'s `STAT` column across every capture taken tonight: consistently `SN` for both vLLM processes, including immediately after fresh restarts. The `N` flag (reduced scheduling priority) being present from the very start, not appearing specifically after idle, weakens a simple "static niceness explains this" theory — whatever's happening is more dynamic than a fixed nice value.
+
+The tool that actually shows real QoS class transitions per thread — Instruments' Thread State trace template — requires full Xcode, which isn't installed on this machine (only Command Line Tools). Xcode is a 10+ GB App Store download. Weighed the cost against the marginal value of one more confirming layer, given four already-strong independent lines of evidence (GPU power telemetry, `py-spy` pinning the exact line, native `sample` showing the exact blocking C++ call, `caffeinate` ruling out the simplest fix) — decided not to install Xcode just for this. 
+
+### Where this leaves the investigation, honestly stated
+
+Root cause: `mx.async_eval()` blocks inside MLX's own native `eval_impl`, on a genuine `std::condition_variable::wait`. The leading explanation — that this condition variable is waiting on an MLX-internal worker thread not being scheduled promptly by macOS after idle — remains a **well-evidenced hypothesis, not a fully confirmed one**. The exact OS-level mechanism (QoS throttling specifically, versus some other scheduling delay) is the one link in the chain that was not directly observed. Stated plainly rather than overclaimed, matching this project's standing discipline. Next: draft and file an upstream report with `vllm-metal`/MLX, presenting the evidence trail exactly as strong as it actually is.
