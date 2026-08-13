@@ -15,6 +15,16 @@ material for a "lessons learned" writeup, not just a changelog.
 > entries technical/professional — personal reflections belong in the
 > local-only `NOTES_PERSONAL.md`, not here.
 
+## Start here: 3 entries worth reading first
+
+This log runs long (1800+ lines) because it's a running narrative, not a
+changelog. If you're skimming, these three tell the real story — see
+[`PHASE1_RETROSPECTIVE.md`](PHASE1_RETROSPECTIVE.md) §2 for the full context:
+
+1. **["Item #8 — burst test" ](#entry-item-8--burst-test-spike-550-and-a-much-larger-version-of-item-7s-open-mystery)** — a routine burst test (spike 5→50 concurrent requests) found that recovery never completed in the 28 minutes tested: every probe came back 20x-115x slower than baseline, with no downward trend.
+2. **["Root-causing the async_eval stall"](#entry-root-causing-the-async_eval-stall--from-three-vague-candidates-to-mxasync_eval--eval_impl--condition_variablewait)** — traced that finding to a genuine `std::condition_variable::wait` inside MLX's own native code, confirmed with `py-spy`, macOS's `sample` tool, and independent corroboration from a different serving stack on different hardware.
+3. **["Item #9 closed"](#entry-item-9-closed--clean-vs-stalled-cost-comparison-wired-into-grafana)** — put a real dollar figure on the above: a stalled run costs ~3.6x more per 1K tokens than a clean one, wired live into Grafana.
+
 ## Entry: `--max-num-seqs` — the flag that silently did nothing
 
 **Date:** 2026-08-01
@@ -1860,3 +1870,30 @@ The tool that actually shows real QoS class transitions per thread — Instrumen
 ### Where this leaves the investigation, honestly stated
 
 Root cause: `mx.async_eval()` blocks inside MLX's own native `eval_impl`, on a genuine `std::condition_variable::wait`. The leading explanation — that this condition variable is waiting on an MLX-internal worker thread not being scheduled promptly by macOS after idle — remains a **well-evidenced hypothesis, not a fully confirmed one**. The exact OS-level mechanism (QoS throttling specifically, versus some other scheduling delay) is the one link in the chain that was not directly observed. Stated plainly rather than overclaimed, matching this project's standing discipline. Next: draft and file an upstream report with `vllm-metal`/MLX, presenting the evidence trail exactly as strong as it actually is.
+
+## Note: scope decision — the async_eval investigation is not a numbered Phase 1 item
+
+**Date:** 2026-08-12
+
+Checked against `LLM_PE_Master_Plan_v4.pdf`'s actual Phase 1 task table directly (not from memory) to settle whether the async_eval stall work maps onto any of items #11/#15/#16/#17, since it was triggered mid-sequence by item #8's burst test. It does not:
+
+- **#11** is "streaming API: SSE vs WebSocket vs HTTP... TTFT/TPOT streaming vs batch" — already closed on its own distinct content, no overlap.
+- **#15** is "Interview prep: articulate the TTFT vs TPOT vs ITL distinction out loud" — pure narration item, unrelated.
+- **#16** is "Push to GitHub: llm-serving-lab/vllm-benchmark. README with architecture diagram, setup steps, sample Grafana screenshot" — repo-hygiene deliverable, unrelated.
+- **#17** is the phase retrospective (self-scoring) — the async_eval saga is worth *mentioning* there, but the retrospective task itself isn't what this investigation fulfills.
+
+So the async_eval work is genuinely adjacent/backlog: real infrastructure work surfaced honestly by doing items #7 and #8 as specified, not something the master plan itself scoped or anticipated. It sits outside the 17-item list. Keeping this explicit so a future session doesn't mistakenly count it toward closing #11/#15/#16/#17, or conversely treat it as unscoped/optional busywork — it's neither; it's real, plan-adjacent work with its own status (see entries above), tracked on its own terms.
+
+## Entry: Item #15 — interview prep, TTFT vs TPOT vs ITL by workload — CLOSED
+
+**Date:** 2026-08-13
+
+Item #15 asks to articulate, out loud, which of TTFT/TPOT/ITL dominates for a given real-world workload — a different question from item #11's (which established what the three metrics *are* and how they collapse in non-streaming mode). Written up as a new section in `INTERVIEW_PREP.md`, three subsections (chatbot, batch processing, coding assistant), each with a spoken answer plus a tough follow-up, grounded in this project's own measured numbers wherever one exists:
+
+- **Chatbot** — TTFT dominates (blank-screen perceived-responsiveness argument), illustrated with the real item #8 finding (20-115x TTFT blowup post-burst). Follow-up separates the general claim (hardware-agnostic) from the specific number (M4/MLX-specific, no H100 evidence).
+- **Batch processing** — throughput/cost dominate, grounded in the real saturation curve (peak 147.5 tok/s at concurrency 25, dropping to 80.2 tok/s at 50). Follow-up admits the drop's mechanism was never root-caused past "measured inflection point."
+- **Coding assistant** — reworked after review to flag it as **conceptual, not benchmarked** directly in the subsection header (not just in the follow-up): argues ITL over TPOT via the item #3 masking mechanism (a single 25x-slower token gets diluted in an averaged TPOT but shows up in raw ITL), but states up front that no coding-assistant-shaped workload was ever actually run.
+
+Reviewed with the user before closing; the one requested change (pulling the "not benchmarked" caveat up into the header rather than leaving it only in the follow-up) is applied.
+
+### Item #15 — CLOSED

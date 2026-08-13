@@ -3,6 +3,10 @@
 This project follows the hands-on, first-principles, employer-demonstration
 approach defined in [LEARNING_AND_PORTFOLIO_STANDARD.md](LEARNING_AND_PORTFOLIO_STANDARD.md).
 
+See [PHASE1_LOG.md](PHASE1_LOG.md) for a full technical narrative of
+debugging decisions, root-cause investigations, and verification
+methodology across this project.
+
 ## Goal
 
 Deploy vLLM locally and serve a 7B/8B instruction model through its
@@ -17,6 +21,44 @@ mlx-community/Mistral-7B-Instruct-v0.3-4bit
 This is a 4-bit build of Mistral-7B-Instruct. It is validated by the
 vLLM-Metal project on this exact M4 Mac mini/16 GB hardware profile and does
 not require accepting Meta's Llama license.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    classDef metal fill:#ffe9cc,stroke:#cc7a00,stroke-width:2px,color:#222;
+    classDef note fill:#fff3cd,stroke:#997404,color:#664d03,stroke-dasharray: 4 3;
+
+    H["Benchmark harness (client)<br/>async concurrency control<br/>sweep: 1→5→10→25→50"]
+    V["vLLM-metal / MLX serving process<br/><b>Apple Silicon / MLX backend</b><br/>4-bit Mistral-7B · OpenAI-compatible API"]:::metal
+    PM["powermetrics exporter<br/>:9400"]
+    JL["JSONL logs<br/>(harness output)"]
+    CE["cost_exporter.py<br/>cost_per_1k_tokens · tokens_per_dollar"]
+    P["Prometheus"]
+    G["Grafana<br/>TTFT heatmap · tok/s vs concurrency · p99 trend ·<br/>GPU SM util · HBM/bandwidth proxy · KV cache fill · cost"]
+    NOTE["Adapted for Apple Silicon:<br/>powermetrics substitutes for NVIDIA DCGM<br/>(no NVIDIA GPU present)"]:::note
+
+    H -- "HTTP, OpenAI-compatible API" --> V
+    V -- "telemetry" --> PM
+    PM -- "scrape, DCGM substitute" --> P
+    H -- "writes" --> JL
+    JL -- "parsed by" --> CE
+    CE -- "scrape" --> P
+    P -- "query" --> G
+    V -.-> NOTE
+```
+
+The orange box is deliberate: this is not a standard NVIDIA/CUDA vLLM
+deployment. Two of the six Grafana panels (GPU SM utilization, HBM
+bandwidth) normally come from NVIDIA's DCGM exporter, which doesn't exist
+on Apple Silicon — `observability/powermetrics_exporter.py` substitutes a
+real `powermetrics`-based signal instead, with the substitution stated
+explicitly (see `PHASE1_LOG.md`'s Task 6 entry for how the HBM-bandwidth
+panel gap was handled specifically).
+
+### Live dashboard
+
+![Grafana dashboard: vLLM Saturation & GPU Dashboard (M4 Mac mini) — TTFT heatmap, tokens/sec vs concurrency, TTFT p99 trend, GPU SM utilization, GPU active frequency, KV cache fill level, and cost-per-1K-tokens/tokens-per-dollar panels, all populated with live data from a real benchmark run](docs/Xnip2026-08-12_21-49-02.jpg)
 
 ## Current-machine preflight
 
