@@ -18,3 +18,14 @@ nodes:
         hostPort: 8443
         protocol: TCP
   - role: worker
+    # Added for task #5's object-store durability extension: bind-mounts a
+    # real directory on the Mac's own disk into this node, at cluster-create
+    # time (extraMounts can't be added to an already-running cluster). A
+    # PVC/local-path volume lives inside the node's own ephemeral container
+    # filesystem and is destroyed by `kind delete cluster`; a hostPath
+    # volume pointed at this mounted path is NOT -- it's the Mac's real
+    # disk the whole time, so MinIO's data genuinely survives tearing the
+    # cluster down and recreating it.
+    extraMounts:
+      - hostPath: /Users/rahulpunde/Documents/vllm-apple-silicon-serving/k8s/minio-data
+        containerPath: /mnt/minio-data
