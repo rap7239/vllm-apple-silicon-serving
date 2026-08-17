@@ -12,6 +12,12 @@
 # No `ttlSecondsAfterFinished` set on purpose: auto-cleanup would delete
 # this Job's pod (and its logs) before we've had a chance to inspect
 # `kubectl logs` / `kubectl get pods` -- delete it manually once done.
+#
+# MINIO_ROOT_USER/PASSWORD: demo credentials matching k8s/minio-deployment.yaml,
+# consumed by run_and_upload.sh's `mc alias set` step to push results into
+# the object store after run_bench.py finishes (durable, survives cluster
+# teardown) in addition to the PVC copy below (not durable across
+# `kind delete cluster`, but kept for the direct comparison).
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -40,8 +46,13 @@ spec:
             - --concurrency
             - "5"
             - --variant
-            - k8s-job
+            - k8s-job-minio
             - --no-gpu-metrics
+          env:
+            - name: MINIO_ROOT_USER
+              value: "minioadmin"
+            - name: MINIO_ROOT_PASSWORD
+              value: "minioadmin"
           volumeMounts:
             - name: bench-results
               mountPath: /app/runs

@@ -7,3 +7,4 @@ __pycache__/
 NOTES_PERSONAL.md
 INTERVIEW_PREP.md
 *.log
+k8s/minio-data/

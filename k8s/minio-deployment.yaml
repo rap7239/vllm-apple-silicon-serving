@@ -1,0 +1,54 @@
+# Task #5 durability extension: MinIO gives the benchmark harness a real
+# S3-compatible object store to write to, instead of (or alongside) the
+# local-path-backed PVC. The durability actually comes from the volume
+# below, not from MinIO itself -- see k8s/kind-config.yaml's extraMounts
+# comment.
+#
+# nodeSelector is required, not optional: the hostPath below only exists on
+# vllm-local-worker (the node kind-config.yaml's extraMounts targets). This
+# is the exact same class of bug just hit with ingress-nginx -- a pod using
+# a node-specific volume MUST be pinned to that node, or the scheduler is
+# free to place it anywhere and the volume silently won't be there.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  labels:
+    app: minio
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: minio
+  template:
+    metadata:
+      labels:
+        app: minio
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: vllm-local-worker
+      containers:
+        - name: minio
+          image: minio/minio:latest
+          args: ["server", "/data", "--console-address", ":9001"]
+          env:
+            # Demo credentials for a local-only, no-internet-exposure lab
+            # cluster -- not meant to represent real production secret
+            # handling.
+            - name: MINIO_ROOT_USER
+              value: "minioadmin"
+            - name: MINIO_ROOT_PASSWORD
+              value: "minioadmin"
+          ports:
+            - containerPort: 9000
+              name: s3-api
+            - containerPort: 9001
+              name: console
+          volumeMounts:
+            - name: minio-data
+              mountPath: /data
+      volumes:
+        - name: minio-data
+          hostPath:
+            path: /mnt/minio-data
+            type: Directory

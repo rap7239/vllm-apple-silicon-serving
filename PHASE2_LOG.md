@@ -260,3 +260,170 @@ With the port-forward confirmed listening (`lsof` showed `kubectl` bound to
   pipeline, which is the actual ask behind task #4.
 
 ### Task #4 — CLOSED
+
+## Entry: Task #5 revisited — object-store durability extension, and an 8th real bug
+
+**Date:** 2026-08-15 through 2026-08-17
+
+### Why revisit a closed task
+
+Task #5's core ask (harness as a K8s Job, JSONL to PVC) closed cleanly on
+2026-08-15/16 — see the entries above. But the master plan's own wording is
+"JSONL to PVC *or object store*," and `bench-results-pvc` is backed by
+`kind`'s default `local-path` StorageClass — real storage, genuinely
+survives individual pod/Job deletions, but **not** `kind delete cluster`,
+since under the hood it's just a directory inside the disposable node
+container's own filesystem. Chose to close that gap for real rather than
+leave it as a stated-but-unaddressed limitation, and to use the exercise as
+a full from-scratch revision of task #5 (deliberately recreating the
+cluster to force a genuine "start from nothing" redo, not just a mental
+exercise).
+
+### The real fix: `hostPath` + `kind`'s `extraMounts`, not a fancier PVC
+
+A naive "just add MinIO" wouldn't have solved anything — MinIO's own PVC
+would use the exact same `local-path` StorageClass, inheriting the identical
+durability ceiling. The actual fix has nothing to do with Kubernetes storage
+abstractions at all: `k8s/kind-config.yaml`'s worker node now has an
+`extraMounts` entry bind-mounting `k8s/minio-data/` (a real directory on the
+Mac's own disk) to `/mnt/minio-data` inside the node container. Verified
+this is a genuine two-way bind (not two synced copies) by writing a file
+from the Mac side and reading the identical content back via `docker exec`
+into the node. `extraMounts` can only be set at cluster-creation time, which
+meant tearing down and recreating `vllm-local` entirely.
+
+### Full rebuild from a blank cluster
+
+`kind delete cluster --name vllm-local` → `kind create cluster --config
+k8s/kind-config.yaml` (with the new `extraMounts`), then rebuilt every piece
+from tasks #1-#4: reloaded both images (`vllm-cpu-demo:v1`,
+`vllm-bench-harness:v1` — these persist in Docker Desktop's own image store
+independent of the `kind` node, so only needed re-loading, not rebuilding),
+relabeled the control-plane node `ingress-ready=true`, reinstalled
+`ingress-nginx`, reinstalled the Prometheus Operator (pinned `v0.93.1`,
+same as before) + `k8s/monitoring/*.yaml`, and `helm install`ed the chart
+with `--set serviceMonitor.enabled=true`.
+
+### Bug #8: a real scheduler race, distinct from task #3's endpoint race
+
+Post-rebuild, `curl localhost:8080/health` failed with `Recv failure:
+Connection reset by peer` — not the task #3 "no active Endpoint" 503, a
+different failure signature entirely. Diagnosed properly rather than
+retried blind: confirmed from *inside* the cluster that both the
+`ingress-nginx` Service and the `vllm-cpu-demo` pod answered `200`
+correctly (via a throwaway debug pod), which narrowed the fault to
+specifically the host-port-forwarding hop. Checked `docker port` on both
+node containers directly — only `vllm-local-control-plane` has the
+`8080->80` mapping (per `kind-config.yaml`'s `extraPortMappings`, which is
+only declared on that node); `vllm-local-worker` has none at all. Then
+checked *which node the ingress-nginx-controller pod actually landed on*:
+`vllm-local-worker` — the wrong one.
+
+Root cause: the upstream `kind`-flavored `ingress-nginx` manifest declares
+`hostPort: 80/443` on the controller container (binds directly to whatever
+node it schedules onto) and a toleration for the control-plane's taint (so
+it's *allowed* to land there) — but no `nodeSelector` actually forcing it
+onto that specific node. The first time this was built (2026-08-13/14), it
+happened to schedule onto the control-plane node by scheduler luck. This
+time, with two otherwise-empty nodes to choose from, it landed on the
+worker instead — which has no host port mapping at all, so Mac's
+`localhost:8080` was forwarding into a control-plane container port that
+nothing was listening on anymore. That's exactly why the failure was a TCP
+*reset* rather than a timeout or connection-refused.
+
+Fixed by patching the Deployment directly to add the missing constraint:
+
+```
+kubectl patch deployment ingress-nginx-controller -n ingress-nginx \
+  --type merge -p '{"spec":{"template":{"spec":{"nodeSelector":
+  {"kubernetes.io/os":"linux","ingress-ready":"true"}}}}}'
+```
+
+**Lesson for any future cluster recreate:** this manifest's node placement
+was never actually deterministic — it worked before by chance, not because
+anything pinned it. Apply this `nodeSelector` patch as a standard step
+immediately after installing `ingress-nginx`, not just when it happens to
+break.
+
+Verified fully end-to-end after the patch: `/health` → `200`, and a real
+`/v1/chat/completions` response with genuine generated text through the
+full `localhost:8080` → ingress → Service → pod path.
+
+### Deploying MinIO and wiring the harness to it
+
+`k8s/minio-deployment.yaml` (image `minio/minio:latest`, args `server /data
+--console-address :9001`) + `k8s/minio-service.yaml`. The Deployment is
+pinned with `nodeSelector: kubernetes.io/hostname: vllm-local-worker` —
+deliberately, to avoid the exact same bug class as bug #8: the `hostPath`
+volume only exists on the worker node kind-config's `extraMounts` targets,
+so an unpinned pod could land on the control-plane node and silently get an
+empty (or freshly-created, non-`Directory`) mount instead. Confirmed
+`.minio.sys` appeared for real in `k8s/minio-data/` on the Mac disk, and the
+S3 API answered `200`.
+
+Created a `bench-results` bucket via a throwaway `minio/mc` pod. Updated
+`vllm-benchmark/Dockerfile.harness` to add the `mc` client, and added a new
+`vllm-benchmark/run_and_upload.sh` wrapper that runs `run_bench.py` then
+`mc cp`s the PVC's `runs/*.csv`/`*.jsonl` into the bucket.
+`k8s/benchmark-job.yaml` updated with `--variant k8s-job-minio` and
+`MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD` env vars.
+
+**Real build gotcha:** rebuilding the harness image directly from
+`~/Documents/vllm-benchmark` failed repeatedly (`transferring dockerfile:
+2B` / `no such file`) across several invocation styles, even though the
+original unedited image had built fine from the same location days
+earlier. Root cause: `~/Documents` is iCloud Drive-synced, and Docker
+Desktop's build engine was getting a stale/incomplete view specifically of
+the *just-edited* Dockerfile. Fixed by copying the build context to `/tmp`
+(never iCloud-synced) and building from there. Apply this workaround again
+if `Dockerfile.harness` or `k8s/Dockerfile` is edited and hits the same
+symptom.
+
+Reran the Job with the new image: real `mc cp` upload log (4 files, 217.40
+KiB total, ~2 MiB/s), independently reverified via a second throwaway
+`mc ls local/bench-results/` pod — `k8s-job-minio.csv` (4.0KiB),
+`k8s-job-minio.jsonl` (105KiB), plus the older `k8s-job.csv`/`.jsonl` pair
+riding along (harmless — `run_and_upload.sh`'s glob uploads everything
+currently on the PVC, not just the newest variant).
+
+### The durability proof, 2026-08-17
+
+The actual point of this extension: prove MinIO's storage survives cluster
+deletion while the PVC's does not. Predicted first, then executed:
+
+```
+kind delete cluster --name vllm-local
+kind create cluster --config k8s/kind-config.yaml
+kubectl apply -f k8s/minio-deployment.yaml -f k8s/minio-service.yaml
+kubectl get pvc bench-results-pvc
+kubectl run mc-check --rm --restart=Never --image=minio/mc --command --attach -- \
+  sh -c "mc alias set local http://minio:9000 minioadmin minioadmin && mc ls local/bench-results/"
+```
+
+Result, exactly as predicted:
+- `kubectl get pvc bench-results-pvc` → `Error from server (NotFound)`.
+  `benchmark-pvc.yaml` was never reapplied, and even if it had been, a fresh
+  PVC would start empty — the point stands either way.
+- `mc ls local/bench-results/` → all 4 files reappeared with their
+  **original** timestamps (`23:15:33`, not a fresh write) and unchanged
+  sizes, with zero re-running of the benchmark and zero re-upload.
+
+This is genuine, live proof that in this topology MinIO's durability comes
+entirely from the `hostPath`/`extraMounts` bind to the Mac's real disk, not
+from anything Kubernetes-native — and that the PVC does not survive cluster
+deletion, confirming the gap this extension was built to close. The
+architectural point for a real cloud environment: an actual S3/GCS bucket
+would give the same durability property without needing a manual
+bind-mount trick, since the object store's backing storage is inherently
+off-node there.
+
+After the proof, rebuilt the rest of the stack on the same fresh cluster
+(images reloaded, `ingress-nginx` + the bug #8 nodeSelector patch, Prometheus
+Operator + `k8s/monitoring/*.yaml`, `helm install ... --set
+serviceMonitor.enabled=true`) and reverified fully end-to-end: `/health` →
+`200`, a real `/v1/chat/completions` completion through ingress → Service →
+pod, and `vllm:num_requests_running` returned from the in-cluster
+Prometheus with genuine K8s service-discovery labels — confirming tasks
+#1-#4 all still hold on the rebuilt cluster, not just task #5's extension.
+
+### Task #5 (revised, with object-store durability) — CLOSED
