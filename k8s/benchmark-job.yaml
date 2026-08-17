@@ -1,0 +1,51 @@
+# Phase 2 task #5: run the Phase 1 benchmark harness (vllm-benchmark's
+# run_bench.py) as a K8s Job, in-cluster, against the vllm-cpu-demo Service
+# (not a local CLI invocation against a port-forward). See PHASE2_LOG.md.
+#
+# --base-url uses the Service's in-cluster DNS name directly (no
+# port-forward/Ingress needed -- this pod is already on the cluster
+# network). --no-gpu-metrics: the powermetrics_exporter.py sidecar this
+# harness normally scrapes is macOS-only and needs sudo, so it has no
+# in-cluster equivalent here -- same environment-adaptation gap as
+# elsewhere in Phase 2, stated rather than faked.
+#
+# No `ttlSecondsAfterFinished` set on purpose: auto-cleanup would delete
+# this Job's pod (and its logs) before we've had a chance to inspect
+# `kubectl logs` / `kubectl get pods` -- delete it manually once done.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: vllm-bench-job
+spec:
+  backoffLimit: 1
+  template:
+    metadata:
+      labels:
+        app: vllm-bench-job
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: bench
+          image: vllm-bench-harness:v1
+          imagePullPolicy: IfNotPresent
+          args:
+            - --base-url
+            - http://vllm-cpu-demo:80/v1
+            - --api-key
+            - local-vllm-key
+            - --model
+            - Qwen/Qwen2.5-0.5B-Instruct
+            - --dataset
+            - datasets/prompts.jsonl
+            - --concurrency
+            - "5"
+            - --variant
+            - k8s-job
+            - --no-gpu-metrics
+          volumeMounts:
+            - name: bench-results
+              mountPath: /app/runs
+      volumes:
+        - name: bench-results
+          persistentVolumeClaim:
+            claimName: bench-results-pvc

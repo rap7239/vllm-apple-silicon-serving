@@ -1,0 +1,82 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    app: {{ .Release.Name }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}
+    spec:
+      {{- if gt (.Values.gpu.count | int) 0 }}
+      tolerations:
+        - key: {{ .Values.gpu.toleration.key }}
+          operator: {{ .Values.gpu.toleration.operator }}
+          effect: {{ .Values.gpu.toleration.effect }}
+      {{- end }}
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.shm.sizeLimit }}
+      containers:
+        - name: vllm
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # Overrides the image's own ENTRYPOINT so model/max-model-len
+          # stay chart-configurable rather than fixed at build time.
+          command: ["vllm", "serve", {{ .Values.model | quote }}]
+          args:
+            - --host=0.0.0.0
+            - --port=8000
+            - --max-model-len={{ .Values.maxModelLen }}
+            {{- if gt (.Values.gpu.count | int) 0 }}
+            {{- else }}
+            - --gpu-memory-utilization={{ .Values.gpuMemoryUtilization }}
+            {{- if .Values.enforceEager }}
+            - --enforce-eager
+            {{- end }}
+            {{- end }}
+          ports:
+            - containerPort: 8000
+              name: http
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+          resources:
+            requests:
+              {{- if gt (.Values.gpu.count | int) 0 }}
+              nvidia.com/gpu: {{ .Values.gpu.count }}
+              {{- end }}
+              cpu: {{ .Values.resources.requests.cpu | quote }}
+              memory: {{ .Values.resources.requests.memory | quote }}
+            limits:
+              {{- if gt (.Values.gpu.count | int) 0 }}
+              nvidia.com/gpu: {{ .Values.gpu.count }}
+              {{- end }}
+              cpu: {{ .Values.resources.limits.cpu | quote }}
+              memory: {{ .Values.resources.limits.memory | quote }}
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 15
+            failureThreshold: 5

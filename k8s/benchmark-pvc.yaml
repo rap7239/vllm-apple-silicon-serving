@@ -1,0 +1,17 @@
+# PersistentVolumeClaim so the benchmark Job's output (JSONL/CSV under
+# run_bench.py's `runs/` directory) survives after the Job's pod finishes
+# and is torn down. Backed by kind's default local-path provisioner --
+# durable across pod deletion, but NOT across `kind delete cluster` (it's
+# ultimately a directory on the kind node's own container filesystem, not
+# a real external disk). Stated explicitly, same honesty pattern as the
+# GPU-scheduling gap noted elsewhere in this repo.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: bench-results-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 200Mi

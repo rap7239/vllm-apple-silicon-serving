@@ -1,0 +1,60 @@
+# Model is baked into the image at build time (see ../Dockerfile) so pod
+# startup doesn't need network access. Changing `model` here only takes
+# effect if `image.tag` also points at an image that has THAT model's
+# weights baked in — Helm cannot make different weights appear inside an
+# already-built image. This is a real limitation, not an oversight.
+model: Qwen/Qwen2.5-0.5B-Instruct
+maxModelLen: 32768
+
+replicaCount: 1
+
+image:
+  repository: vllm-cpu-demo
+  tag: v1
+  pullPolicy: IfNotPresent
+
+# gpu.count > 0 adds nvidia.com/gpu requests/limits + the matching
+# toleration, for a real GPU cluster. Left at 0 here since no GPU node
+# exists in this local `kind` environment (Phase 2 environment-adaptation
+# decision) — not faked, genuinely dropped when 0.
+gpu:
+  count: 0
+  toleration:
+    key: nvidia.com/gpu
+    operator: Exists
+    effect: NoSchedule
+
+# On vLLM's CPU backend this flag is repurposed to mean "fraction of host
+# RAM to reserve," not GPU VRAM — sized against this lab's kind node
+# (~7.75GiB total, ~4GiB typically free). Only used when gpu.count == 0.
+gpuMemoryUtilization: 0.4
+enforceEager: true
+
+resources:
+  requests:
+    cpu: "2"
+    memory: "4Gi"
+  limits:
+    cpu: "4"
+    memory: "7Gi"
+
+# vLLM's CPU multiprocess workers pass tensors via /dev/shm. Kubernetes
+# pods default to 64MB, nowhere near enough (see PHASE1/2 log for the
+# SIGBUS crash this caused before the fix).
+shm:
+  sizeLimit: 2Gi
+
+service:
+  port: 80
+
+ingress:
+  enabled: true
+  className: nginx
+  path: /
+  proxyReadTimeoutSeconds: 300 # generous headroom for slow CPU inference
+
+# Requires the Prometheus Operator's CRDs to already be installed in the
+# cluster (see k8s/monitoring/) -- defaults to false so a fresh `helm
+# install` never fails on a missing CRD before that's set up.
+serviceMonitor:
+  enabled: false
