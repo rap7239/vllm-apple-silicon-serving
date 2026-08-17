@@ -14,3 +14,20 @@ datasources:
     url: http://prometheus:9090
     isDefault: true
     editable: true
+
+  # Phase 2 task #4: in-cluster Prometheus (Prometheus Operator + a
+  # ServiceMonitor, k8s/monitoring/), reached via a `kubectl port-forward`
+  # bound to the host so Grafana's Docker container can reach it via
+  # host.docker.internal -- Docker Desktop for Mac has no direct route into
+  # kind's cluster network otherwise. Not a permanent bridge: the
+  # port-forward must be running for this datasource to resolve. Same
+  # metric names as the "Prometheus" datasource above (same vLLM /metrics
+  # format), which is what actually proves K8s-sourced metrics are
+  # dashboard-compatible.
+  - name: Prometheus (K8s)
+    uid: prometheus-k8s-vllm
+    type: prometheus
+    access: proxy
+    url: http://host.docker.internal:9092
+    isDefault: false
+    editable: true

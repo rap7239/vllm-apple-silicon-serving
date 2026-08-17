@@ -1,0 +1,28 @@
+# Minimal in-cluster Prometheus for Phase 2 task #4 -- deliberately NOT the
+# full kube-prometheus-stack (which also bundles Alertmanager, node-exporter,
+# kube-state-metrics, and its own Grafana). This lab already has a real
+# Grafana/Prometheus stack from Phase 1 (observability/docker-compose.yml);
+# the goal here is proving K8s-native service discovery via a genuine
+# ServiceMonitor CRD, feeding that SAME existing Grafana as a second data
+# source -- not standing up a parallel, duplicate observability stack.
+# Sized small (see resources below) to fit comfortably in the remaining
+# headroom on the kind worker node (~3.8GiB of unclaimed memory requests
+# at the time this was written).
+apiVersion: monitoring.coreos.com/v1
+kind: Prometheus
+metadata:
+  name: vllm-lab
+  namespace: default
+spec:
+  serviceAccountName: prometheus-k8s
+  serviceMonitorSelector: {}
+  serviceMonitorNamespaceSelector: {}
+  retention: 6h
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi

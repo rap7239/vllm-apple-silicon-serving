@@ -1,0 +1,11 @@
+apiVersion: v2
+name: vllm-cpu-demo
+description: >
+  vLLM serving chart for this project's Phase 2 (K8s) local lab. Runs
+  upstream vLLM's CPU build (not vllm-metal, which is macOS/Metal-only and
+  cannot run in a Linux container). GPU support is templated for a future
+  real GPU cluster but defaults to disabled here, since no GPU node exists
+  in this local `kind` environment.
+type: application
+version: 0.1.0
+appVersion: "0.26.0"
