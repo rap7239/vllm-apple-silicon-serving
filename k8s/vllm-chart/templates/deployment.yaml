@@ -9,7 +9,7 @@ spec:
   selector:
     matchLabels:
       app: {{ .Release.Name }}
-    strategy:
+  strategy:
       type: Recreate 
   template:
     metadata:
