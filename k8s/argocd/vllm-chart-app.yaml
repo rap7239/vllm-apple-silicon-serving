@@ -1,0 +1,36 @@
+# Phase 2 task #9: ArgoCD Application for the vLLM serving stack (Helm
+# chart source). Kept separate from MinIO's Application (minio-app.yaml) --
+# storage is shared platform infrastructure, not part of the serving
+# workload, so it gets its own sync/rollback unit. See PHASE2_LOG.md.
+#
+# No sync-wave ordering needed against the Prometheus Operator: its CRDs
+# were installed manually, outside ArgoCD's scope entirely, so there's
+# nothing for this Application's sync to wait on. Would matter if the
+# Operator itself were ever brought under GitOps too.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: vllm-chart
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/rap7239/vllm-apple-silicon-serving.git
+    targetRevision: main
+    path: k8s/vllm-chart
+    helm:
+      # ArgoCD defaults the Helm release name to the Application's own
+      # name ("vllm-chart"), not the original manually-installed release
+      # name ("vllm-cpu-demo") -- pinned explicitly so object names stay
+      # consistent with k8s/benchmark-job.yaml's hardcoded --base-url and
+      # everything else already referencing "vllm-cpu-demo".
+      releaseName: vllm-cpu-demo
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: default
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
