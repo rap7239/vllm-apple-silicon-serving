@@ -53,8 +53,9 @@ ingress:
   path: /
   proxyReadTimeoutSeconds: 300 # generous headroom for slow CPU inference
 
-# Requires the Prometheus Operator's CRDs to already be installed in the
-# cluster (see k8s/monitoring/) -- defaults to false so a fresh `helm
-# install` never fails on a missing CRD before that's set up.
+  # Requires the Prometheus Operator's CRDs to be installed FIRST (see
+  # k8s/monitoring/) -- a fresh `helm install` against a cluster without them
+  # will fail. In ArgoCD, this ordering is enforced via sync waves (see
+  # PHASE2_LOG.md task #9).
 serviceMonitor:
-  enabled: false
+  enabled: true
