@@ -27,7 +27,7 @@ gpu:
 # On vLLM's CPU backend this flag is repurposed to mean "fraction of host
 # RAM to reserve," not GPU VRAM — sized against this lab's kind node
 # (~7.75GiB total, ~4GiB typically free). Only used when gpu.count == 0.
-gpuMemoryUtilization: 0.4
+gpuMemoryUtilization: 0.3
 enforceEager: true
 
 resources:
