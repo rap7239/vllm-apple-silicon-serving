@@ -1,0 +1,28 @@
+# Phase 2 task #9: ArgoCD Application for MinIO (plain-manifest source,
+# not Helm). Deliberately separate from vllm-chart-app.yaml -- see that
+# file's comment. `directory.include` scopes this Application to just the
+# two MinIO files; without it, ArgoCD would try to apply every YAML under
+# k8s/, including kind-config.yaml (a `kind` CLI config, not a real
+# Kubernetes manifest -- applying it would just error).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: minio
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/rap7239/vllm-apple-silicon-serving.git
+    targetRevision: main
+    path: k8s
+    directory:
+      include: "minio-*.yaml"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: default
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

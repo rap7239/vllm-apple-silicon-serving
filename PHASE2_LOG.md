@@ -427,3 +427,132 @@ Prometheus with genuine K8s service-discovery labels — confirming tasks
 #1-#4 all still hold on the rebuilt cluster, not just task #5's extension.
 
 ### Task #5 (revised, with object-store durability) — CLOSED
+
+## Entry: Task #9 — ArgoCD GitOps deploy
+
+**Date:** 2026-08-17/18
+
+### Structural decision: two Applications, not one
+
+The master plan's own scope for this task is "deploy via ArgoCD," but a
+real question came first: should MinIO (storage) and the vLLM chart
+(serving) sync as one Application or two? Compared via a 10,000-ft diagram
+before deciding — chose **two separate Applications**, deliberately, over
+folding MinIO into the vLLM chart. Reasoning: shared infrastructure and a
+serving workload shouldn't share one sync/rollback unit in a real platform
+team, and this is the small-scale version of ArgoCD's real "app of apps"
+pattern. `k8s/argocd/vllm-chart-app.yaml` (Helm source) and
+`k8s/argocd/minio-app.yaml` (directory source, `include: "minio-*.yaml"`
+so it doesn't try to apply `kind-config.yaml` or anything else in `k8s/`).
+
+### Prerequisite: closing a real git/live drift before ArgoCD ever touched the cluster
+
+`values.yaml` had `serviceMonitor.enabled: false` committed while the live
+cluster had it manually `--set` to `true` at install time. Since GitOps
+means "git is the only source of truth," this had to be fixed *first* —
+otherwise ArgoCD's first sync would have silently deleted the live
+ServiceMonitor to match the (stale) committed default. Fixed by flipping
+the committed default to `true` before installing ArgoCD at all.
+
+### Installing ArgoCD: two real, fixed bugs
+
+`kubectl apply` (client-side) failed on the `ApplicationSet` CRD: `Too
+long: may not be more than 262144 bytes` — client-side apply stores a full
+last-applied-config annotation, and this CRD is large enough to blow the
+262KB Kubernetes annotation limit. Fixed with `--server-side` (no
+annotation stored). That left a field-manager conflict from the partial
+first attempt (a few objects had already been created by the failed
+client-side apply) — fixed with `--force-conflicts`, safe here since
+nothing else was managing those fields.
+
+### Migrating the existing manual Helm release
+
+`helm uninstall vllm-cpu-demo` run deliberately before creating the
+ArgoCD Application, to avoid dual ownership between Helm's own release
+record and ArgoCD's independently-rendered manifests — standard practice
+for adopting an existing release into GitOps, not a workaround.
+
+### Bug: ArgoCD's default Helm release name isn't your old one
+
+First sync created resources named `vllm-chart-*` (Deployment, Service,
+Ingress, ServiceMonitor), not `vllm-cpu-demo-*`. ArgoCD defaults a Helm
+Application's release name to the **Application's own name**, not
+whatever release name was used with `helm install` manually. This wasn't
+cosmetic — `k8s/benchmark-job.yaml` hardcodes `http://vllm-cpu-demo:80` as
+its `--base-url`, which would have silently broken on the next benchmark
+Job run. Fixed by pinning `spec.source.helm.releaseName: vllm-cpu-demo`
+explicitly in `vllm-chart-app.yaml`. Re-synced; correct names came back,
+old `vllm-chart`-named objects pruned cleanly by ArgoCD itself.
+
+### Bug: host-RAM preflight failure — same class as task #1's bug #6, new trigger
+
+Pod crash-looped: `Available memory on node 0 (3.06/7.75 GiB) ... is less
+than desired CPU memory utilization (0.4, 3.1 GiB)`. Same underlying
+mechanism as task #1's original bug #6 (`--gpu-memory-utilization` on
+vLLM's CPU backend means "fraction of host RAM," not VRAM) — but a new
+trigger this time: the worker node now permanently hosts Prometheus and
+MinIO alongside vLLM, which it didn't during the original task #1 install.
+Fixed: `gpuMemoryUtilization` lowered `0.4` → `0.3` in `values.yaml`,
+committed and pushed. Watched `selfHeal` pick this up automatically with
+zero manual `argocd app sync` — confirmed live in the ArgoCD UI
+(port-forwarded `svc/argocd-server`), including correctly predicting
+beforehand that a live `kubectl patch` instead of a git commit would just
+get silently reverted.
+
+### Bug: RollingUpdate needs 2x capacity, this node doesn't have it
+
+The `0.3` fix triggered a rollout, visible live in the ArgoCD UI's resource
+tree: two ReplicaSets, two pods. The *old* pod (pre-fix) actually
+self-stabilized mid-investigation and came up genuinely healthy — a real,
+unplanned data point (unlike task #1's original crash-loop, which never
+self-resolved). The *new* pod stuck `Pending` for 6+ minutes:
+`FailedScheduling: Insufficient memory`. Root cause: `gpuMemoryUtilization`
+only controls vLLM's *internal* memory choice — it never touched the Pod's
+declared Kubernetes `resources.requests.memory: 4Gi`, which is all the
+scheduler actually looks at. Kubernetes' default `RollingUpdate` strategy
+tries to schedule the new pod (wants `4Gi`) while the old one (holding
+`4Gi`) is still running, and the only untainted node doesn't have room for
+both at once. Fixed by adding `strategy: { type: Recreate }` to the
+Deployment template — kills the old pod fully before creating the new one,
+the standard real choice for a single-replica pod on a resource-constrained
+node, not a hack.
+
+### Bug: a misplaced field Kubernetes silently pruned instead of rejecting
+
+The `Recreate` fix didn't actually take effect on the first attempt, even
+though ArgoCD reported `"successfully synced (all tasks run)"` on every
+sync — `autoHealAttemptsCount` reached **84** with the live Deployment
+still showing default `RollingUpdate`/`25%`/`25%`. Root cause, found by
+diffing `helm template` output line-by-line: `strategy:` had been added at
+4-space indent, nesting it *inside* `selector:` (a `LabelSelector` object)
+instead of as a sibling of `selector`/`template` under `spec:`. Kubernetes'
+schema validation doesn't error on this — it silently prunes fields that
+don't belong on a given sub-object, so the Deployment kept its default
+strategy the entire time with no error anywhere in the chain. Fixed by
+correcting the indentation; verified with a real dry-run apply against the
+API server (not just YAML syntax) before pushing.
+
+### Bug: KV cache starved by the same fix that solved the host-RAM bug
+
+Once `Recreate` genuinely took effect, the old pod was killed and the new
+one finally scheduled — and immediately crash-looped on a **different**
+memory error: `0.38 GiB KV cache is needed ... available KV cache memory
+(0.14 GiB)`. Direct callback to Phase 1 item #2's core mental model (fixed
+weight/overhead cost subtracted from a shrinking pool): lowering
+`gpuMemoryUtilization` to `0.3` shrank the whole memory pool, and since
+model weights + overhead are a fixed cost regardless of the fraction, the
+KV cache got the leftover — which was no longer enough to serve even one
+request at `maxModelLen: 32768`. Fixed by lowering `maxModelLen` to `8192`
+instead of pushing `gpuMemoryUtilization` back up on an already-tight
+shared node — vLLM's own error message stated the real ceiling (`~12544`),
+picked `8192` for real margin rather than hugging it.
+
+### Final verification
+
+`kubectl get application -n argocd` → both `vllm-chart` and `minio`
+`Synced`/`Healthy`. Exactly one pod, `1/1 Running`, `0` restarts. Real
+`/health` → `200` and a real `/v1/chat/completions` completion through the
+full `localhost:8080` → ingress → Service → pod path — same standard used
+for every task in this phase.
+
+### Task #9 — CLOSED
