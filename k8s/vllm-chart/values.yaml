@@ -4,7 +4,7 @@
 # weights baked in — Helm cannot make different weights appear inside an
 # already-built image. This is a real limitation, not an oversight.
 model: Qwen/Qwen2.5-0.5B-Instruct
-maxModelLen: 32768
+maxModelLen: 8192
 
 replicaCount: 1
 
