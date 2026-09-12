@@ -6,5 +6,9 @@ __pycache__/
 .DS_Store
 NOTES_PERSONAL.md
 INTERVIEW_PREP.md
+role_interview_prep.md
+resume_draft.pdf
+job_description.pdf
+LLM_PE_Master_Plan_v4_status_*.pdf
 *.log
 k8s/minio-data/

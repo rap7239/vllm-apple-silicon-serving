@@ -555,4 +555,8 @@ picked `8192` for real margin rather than hugging it.
 full `localhost:8080` → ingress → Service → pod path — same standard used
 for every task in this phase.
 
+## Interim, 2026-09-11/12 — paused for an active interview process (not a phase item)
+
+Tasks #11/#12 paused mid-plan for an in-progress interview loop, not a change to the plan itself — full detail lives outside this log, in local/gitignored notes, deliberately kept separate so this log and the numbered task tracking stay undiluted. One thing worth a pointer here since it's real engineering output, even though it isn't a numbered Phase 2 item: built a working MCP server (`~/Documents/vllm-benchmark/mcp_server/`) wrapping this project's own benchmark harness, verified live against real run data. Resume #11/#12 once the interview round(s) conclude.
+
 ### Task #9 — CLOSED
