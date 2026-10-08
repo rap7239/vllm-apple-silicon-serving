@@ -12,3 +12,4 @@ job_description.pdf
 LLM_PE_Master_Plan_v4_status_*.pdf
 *.log
 k8s/minio-data/
+k8s/garage-data/
