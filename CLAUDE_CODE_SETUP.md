@@ -65,12 +65,12 @@ directory you launch it from (plus subdirectories). You want to launch it from y
 actual project root, not your home directory or Desktop.
 
 ```bash
-cd ~/Documents/vllm-apple-silicon-serving
+cd ~/Projects/vllm-apple-silicon-serving
 claude
 ```
 
 From inside that session, Claude Code can now see `PHASE1_LOG.md`, `scripts/serve.sh`,
-and everything else in the repo — and can also reach `~/Documents/vllm-benchmark` if
+and everything else in the repo — and can also reach `~/Projects/vllm-benchmark` if
 you ask it to (just tell it the path; it can `cd` there or read across, since your
 shell has access to your whole filesystem, not just the launch directory).
 
@@ -164,7 +164,7 @@ content, just handed to a tool that can actually act on it.
 ## 6. How this differs day-to-day from Cowork (things to expect)
 
 - **No "connect a folder" step.** Claude Code already has access to everything under
-  wherever you launched it (`~/Documents/vllm-apple-silicon-serving` and, by
+  wherever you launched it (`~/Projects/vllm-apple-silicon-serving` and, by
   extension, anywhere else on your Mac if you point it there).
 - **It can actually run your server, curl it, and read the live logs** — this is the
   entire reason we moved.

@@ -37,7 +37,7 @@ produced them) so Grafana can distinguish which run is being shown.
 
 Usage
 -----
-    python3 cost_exporter.py --runs-dir ~/Documents/vllm-benchmark/runs --port 9500
+    python3 cost_exporter.py --runs-dir ~/Projects/vllm-benchmark/runs --port 9500
 """
 
 import argparse
