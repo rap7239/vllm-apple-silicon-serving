@@ -560,3 +560,164 @@ for every task in this phase.
 Tasks #11/#12 paused mid-plan for an in-progress interview loop, not a change to the plan itself — full detail lives outside this log, in local/gitignored notes, deliberately kept separate so this log and the numbered task tracking stay undiluted. One thing worth a pointer here since it's real engineering output, even though it isn't a numbered Phase 2 item: built a working MCP server (`~/Documents/vllm-benchmark/mcp_server/`) wrapping this project's own benchmark harness, verified live against real run data. Resume #11/#12 once the interview round(s) conclude.
 
 ### Task #9 — CLOSED
+
+## Entry: Maintenance, 2026-10-05/07 — MinIO root-caused after a 7-week gap; repos moved out of iCloud
+
+Not a numbered task. Resuming #11/#12 after the interim pause surfaced a
+broken MinIO; root-causing it led to moving both repos out of
+iCloud-synced `~/Documents` and rebuilding the cluster.
+
+### State on resume
+
+`kind` node containers had been stopped, not deleted, and restarted with
+Docker Desktop. Both nodes `Ready`; vLLM `1/1 Running` with `RESTARTS 2`.
+`etcd`/`kube-apiserver` showed `AGE 37d` against 50d for everything else,
+dating an earlier, unobserved control-plane restart to ~2026-08-30.
+ArgoCD `vllm-chart` `Synced`/`Healthy`, `minio` `Synced`/`Progressing`.
+MinIO: `ImagePullBackOff`, last restart 37d ago.
+
+### Failure 1: the image is no longer pullable
+
+`describe` → `pull access denied, repository does not exist or may require
+authorization`. Reproduced outside the cluster (`docker pull
+minio/minio:latest` fails on the Mac), so this is upstream, not cluster
+config. The image (`RELEASE.2025-09-07T16-13-09Z`) was still in the
+worker's containerd store (`crictl images`); the pod re-pulled anyway
+because `:latest` defaults to `imagePullPolicy: Always` (confirmed via
+`jsonpath`). Bypassed live with `kubectl patch` → `IfNotPresent`. ArgoCD
+did not revert this: git never declares `imagePullPolicy`, so the
+defaulted field isn't drift.
+
+### Failure 2: `drive not found: Invalid arguments specified`
+
+With the pull bypassed, MinIO exited code 1 within the same second
+(`lastState.terminated`). `kubectl logs --previous` couldn't retrieve the
+log; `crictl logs` on the node gave
+`FATAL Unable to use the drive /data: drive not found: Invalid arguments
+specified`. `/data` is a `hostPath` onto the `extraMounts` bind of
+`k8s/minio-data` (mount type `fakeowner`, Docker Desktop's file sharing).
+
+Hypotheses tested and ruled out:
+- **Image GC:** image present on the node.
+- **Bad image:** same image started cleanly on node-local `/tmp/data`.
+- **`O_DIRECT` unsupported on `fakeowner`:** `dd ... oflag=direct`
+  succeeded on the mount.
+- **Docker Desktop update in the gap:** `Info.plist` last modified Jul 23,
+  before the cluster existed.
+- **Files tampered with:** `format.json`, `config/`, `pool.bin/` unchanged
+  since 2026-08-17; `buckets/` updated 2026-08-22 by MinIO itself (so it
+  was healthy then).
+
+Splitting filesystem from data (T1: fresh dir on the mount → starts; T2:
+copy of old data on node-local disk → fails) exposed the real clue: the
+`cp` for T2 failed with `Resource deadlock avoided` (`EDEADLK`) on every
+file untouched since August, and only those.
+
+### Root cause
+
+`ls -lO` on the Mac: `compressed,dataless`. Disk at 94% (13 GB free).
+iCloud "Desktop & Documents" sync with "Optimize Mac Storage" had evicted
+the files' contents. A Mac process reading a dataless file triggers a
+transparent download; Docker's file-sharing layer cannot, and gets
+`EDEADLK`. MinIO's first startup read (`format.json`) failed → "drive not
+found" → exit 1. Proof: `cat` inside the node fails → `cat` on the Mac
+downloads the file → `cat` inside the node succeeds.
+
+Timeline: healthy 2026-08-22 → node restart ~2026-08-30 (Mac at that point
+under heavy load from a Windows server) → `Always` re-pull succeeded then,
+but the container crashed on the evicted data → `CrashLoopBackOff` for 37
+days → today the re-pull itself fails as well.
+
+### Fix: move both repos out of iCloud-synced storage
+
+Scope: `vllm-apple-silicon-serving` and `vllm-benchmark` →
+`~/Projects/`. The dataless scan found 43,819 evicted files / 224.6 MB
+across both repos, including ~200 `.git` objects each; files were being
+re-evicted minutes after being read. So the move was done as copy → verify
+→ remove, not `mv`:
+
+1. Baseline: both repos committed and in sync with `origin/main`.
+2. Teardown: `kind delete cluster`; `docker compose down` (no `-v`) for the
+   standalone Prometheus/Grafana, whose configs were also bind-mounted from
+   `~/Documents`. Docker Local Volumes 14.97 GB → 0.56 GB; Mac free space
+   13 GB → 21 GB.
+3. A plain `rsync -a` ran at ~1 file/s: every evicted file blocks while
+   iCloud downloads it, one at a time. Counting by name showed ~33,470 of
+   MinIO's 33,478 files were its own scanner caches
+   (`.usage-cache.bin(.bkp)`, `.bloomcycle.bin`, `.usage.json`, thousands of
+   accumulated versions) and ~9,700 were venvs — neither needed. Restarted
+   as a parallel download (`xargs -P 16 cat`) followed by `rsync -a`
+   excluding those, keeping exactly MinIO's 9 essential files
+   (`format.json`, `pool.bin`, `config.json`, IAM format, the bucket's
+   `.metadata.bin`, and the 4 benchmark objects). Minutes instead of hours.
+4. Verified with identical exclusions on both sides: file counts match
+   (354/354, 313/313), 0 dataless files in the copy, `git status` matches
+   the baseline, `git fsck --full` exit 0 (only harmless dangling blobs).
+
+**Connection to task #5:** this log's task #5 entry already recorded
+iCloud giving Docker a stale view of a file in `~/Documents` (the harness
+`docker build` failure), worked around by building from `/tmp`. Same
+hazard; the workaround left it in place. This time it's removed.
+
+Path fixes after the move: `k8s/kind-config.yaml` `extraMounts.hostPath`
+→ `~/Projects/...`; `vllm-benchmark`'s `burst_*.sh`, `cost_test.sh`,
+`archive/run_c*.sh` now `cd` relative to their own location instead of a
+hard-coded `~/Documents` path; `cost_exporter.py` usage example and
+`CLAUDE_CODE_SETUP.md` updated. Historical log entries keep their
+original paths.
+
+### MinIO replaced by Garage; one-time export of the benchmark objects
+
+MinIO's free distribution is gone, not just one tag: Docker Hub repo
+deleted (`repository does not exist` for pinned tags too), Quay `401`,
+and the `mc` client URL in `Dockerfile.harness` returns `HTTP 410 Gone`.
+Upstream archived the project 2026-04-25 and deleted the Docker Hub repo
+2026-09-11 — 12 days after this node's last successful pull. Decision:
+replace with **Garage** (maintained, production-stable, single binary,
+light on memory) rather than pin a third-party rebuild of archived
+software.
+
+One-time export, on the Mac, outside the cluster: Chainguard's MinIO build
+(`RELEASE.2026-09-22`, a year newer than the `2025-09-07` that wrote the
+data) started against a scratch copy of the 9 kept files without
+reformatting the drive, and the `mc` already baked into
+`vllm-bench-harness:v1` copied out all 4 objects: **217.40 KiB, matching
+the August upload log byte for byte.** Saved to
+`vllm-benchmark/runs/minio-export-2026-08-17/`.
+
+Finding: `runs/k8s-job.{csv,jsonl}` (Aug 15, in git) and MinIO's
+same-named objects (Aug 17) have different SHA-256s — they are two
+different runs (request 1 TTFT 8,315 ms vs 699 ms) that reused
+`--variant k8s-job`. All four MinIO objects were unique data. Harness
+follow-up: make output names unique per run.
+
+### Garage validated in plain Docker before touching Kubernetes
+
+Garage `v2.4.1` (`dxflrs/garage`), `server --single-node --default-bucket`:
+cluster layout, access key and `bench-results` bucket created from
+environment variables on first start, no manual `layout assign`/`key
+create`. All secrets (`GARAGE_RPC_SECRET`, `GARAGE_ADMIN_TOKEN`,
+`GARAGE_DEFAULT_ACCESS_KEY`/`_SECRET_KEY`) come from an env file outside
+git (`~/.config/garage-lab/garage.env`, mode 600); `garage.toml` holds no
+secrets. Metadata in SQLite with `metadata_fsync = true`, on the same
+kind of Mac-backed bind mount the cluster uses (`k8s/garage-data/`,
+gitignored before it existed).
+
+Tested one layer at a time, before Kubernetes:
+1. Starts cleanly on the Mac-backed folder (no `ERROR`/`WARN`).
+2. The real `upload_results.py` from `vllm-bench-harness:v2` uploads the 4
+   exported objects; read back through Garage, all 4 SHA-256s match the
+   originals.
+3. Container deleted and recreated (what a pod reschedule does): second
+   start logs no `Creating default ...` lines — startup is idempotent —
+   and a read-only verify (no upload) returns all 4 objects with matching
+   hashes. The data lives in the mounts, not the container.
+
+A first attempt at step 3 re-uploaded before verifying, which would have
+masked data loss; caught and redone with a read-only check.
+
+_In progress — remaining: path fixes (`kind-config.yaml`, venvs), pinned
+pullable MinIO image in git, cluster rebuild via this log's own runbook,
+end-to-end verification including the 4 benchmark objects read back
+through MinIO (which also proves the skipped caches really were
+regenerable)._
