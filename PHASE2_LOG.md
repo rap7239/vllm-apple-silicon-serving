@@ -716,8 +716,34 @@ Tested one layer at a time, before Kubernetes:
 A first attempt at step 3 re-uploaded before verifying, which would have
 masked data loss; caught and redone with a read-only check.
 
-_In progress — remaining: path fixes (`kind-config.yaml`, venvs), pinned
-pullable MinIO image in git, cluster rebuild via this log's own runbook,
-end-to-end verification including the 4 benchmark objects read back
-through MinIO (which also proves the skipped caches really were
-regenerable)._
+### Garage manifests in git (2026-10-09)
+
+`k8s/garage-config.yaml` (the Docker-tested `garage.toml` as a ConfigMap),
+`garage-deployment.yaml`, `garage-service.yaml` and
+`argocd/garage-app.yaml` replace the three MinIO files. Decisions:
+- Image pinned to `v2.4.1` with `IfNotPresent` — the direct fix for
+  Failure 1.
+- `strategy: Recreate`: a rolling update would briefly run two pods on the
+  same SQLite metadata directory on one hostPath.
+- Readiness on `/health` (can serve S3), liveness on a TCP check of the
+  admin port (process alive). Liveness on `/health` would turn a slow
+  start into a restart loop.
+- Credentials from a `garage-credentials` Secret created by hand from the
+  env file, never in git; the benchmark Job reads the same Secret via
+  `secretKeyRef`. ArgoCD prune leaves unmanaged resources alone.
+- `kind-config.yaml` mounts `k8s/garage-data` at `/mnt/garage-data`, with a
+  comment on why the Mac-side folder must stay out of iCloud sync.
+- Known limit: a ConfigMap mounted with `subPath` doesn't update in a
+  running pod; a config change needs a pod restart.
+
+Preparing the rebuild surfaced two more unpinned upstream installs of the
+same kind as `minio/minio:latest`: `ingress-nginx` was installed from its
+`main` branch (the project was archived upstream in 2026-03) and ArgoCD
+from its moving `stable` branch. The rebuild pins both
+(`controller-v1.15.1`, `v3.5.4`).
+
+_In progress — remaining: cluster rebuild with the pinned installs, the
+`garage-credentials` Secret, end-to-end verification (vLLM through
+ingress, ArgoCD Synced/Healthy, the 4 exported objects read back through
+in-cluster Garage, a benchmark Job uploading to Garage), then cleanup of
+`k8s/minio-data`, the `~/Documents` originals and the venvs._
