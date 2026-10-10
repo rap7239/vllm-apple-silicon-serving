@@ -1,0 +1,102 @@
+# Garage: the S3-compatible object store the benchmark Job uploads results
+# to (task #5's durability extension, originally MinIO). As before, the
+# durability comes from the hostPath volume, not from Garage itself -- see
+# kind-config.yaml's extraMounts comment.
+#
+# nodeSelector is required: the hostPath only exists on vllm-local-worker.
+#
+# strategy Recreate, not the default RollingUpdate: a rolling update would
+# start the new pod while the old one still has the same SQLite metadata
+# directory open. Two writers on one SQLite database on a hostPath is how
+# you corrupt it. Recreate stops the old pod first; the cost is a few
+# seconds of downtime per rollout, which a lab object store can take.
+#
+# Credentials come from the garage-credentials Secret, created by hand and
+# deliberately not in git (ArgoCD's prune only touches resources it
+# manages, so it leaves the Secret alone):
+#   kubectl create secret generic garage-credentials \
+#     --from-env-file=$HOME/.config/garage-lab/garage.env
+# --single-node --default-bucket make startup idempotent: first start
+# creates the layout, the access key and the bucket; later starts find them
+# already there and change nothing.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: garage
+  labels:
+    app: garage
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: garage
+  template:
+    metadata:
+      labels:
+        app: garage
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: vllm-local-worker
+      containers:
+        - name: garage
+          # Pinned, never :latest -- :latest defaults to imagePullPolicy
+          # Always, which is exactly what took MinIO down when its image
+          # disappeared upstream.
+          image: dxflrs/garage:v2.4.1
+          imagePullPolicy: IfNotPresent
+          command: ["/garage"]
+          args: ["server", "--single-node", "--default-bucket"]
+          envFrom:
+            - secretRef:
+                name: garage-credentials
+          env:
+            - name: GARAGE_DEFAULT_BUCKET
+              value: bench-results
+          ports:
+            - containerPort: 3900
+              name: s3-api
+            - containerPort: 3901
+              name: rpc
+            - containerPort: 3903
+              name: admin
+          # Readiness = "can serve S3 requests": /health returns 200 only
+          # when the node has its layout and all partitions are available.
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: admin
+            periodSeconds: 5
+          # Liveness = "the process is alive", deliberately a weaker check.
+          # Using /health here would restart a pod that is merely not ready
+          # yet, turning a slow start into a crash loop.
+          livenessProbe:
+            tcpSocket:
+              port: admin
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/garage.toml
+              subPath: garage.toml
+            - name: garage-data
+              mountPath: /var/lib/garage/meta
+              subPath: meta
+            - name: garage-data
+              mountPath: /var/lib/garage/data
+              subPath: data
+      volumes:
+        - name: config
+          configMap:
+            name: garage-config
+        - name: garage-data
+          hostPath:
+            path: /mnt/garage-data
+            type: Directory

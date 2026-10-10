@@ -1,0 +1,34 @@
+# Garage's config file (garage.toml), mounted into the pod by
+# garage-deployment.yaml. Contains no secrets: rpc_secret, admin_token and
+# the default S3 key all come from the garage-credentials Secret as
+# environment variables, so this file can live in git.
+#
+# Replaced MinIO in the 2026-10 maintenance step: MinIO's free
+# distribution is gone (Docker Hub repo deleted, mc download returns 410).
+# See PHASE2_LOG.md.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: garage-config
+data:
+  garage.toml: |
+    metadata_dir = "/var/lib/garage/meta"
+    data_dir = "/var/lib/garage/data"
+    db_engine = "sqlite"
+    # Durability over speed: tiny write volume, so fsync costs nothing here.
+    metadata_fsync = true
+
+    # Single node: every object is stored exactly once.
+    replication_factor = 1
+    rpc_bind_addr = "[::]:3901"
+    rpc_public_addr = "127.0.0.1:3901"
+
+    [s3_api]
+    s3_region = "garage"
+    api_bind_addr = "[::]:3900"
+    root_domain = ".s3.garage.localhost"
+
+    [admin]
+    # /health and /metrics answer without a token. Fine for this lab
+    # (probes need /health open); production would set metrics_token.
+    api_bind_addr = "[::]:3903"

@@ -1,0 +1,17 @@
+# In-cluster address for Garage: the benchmark Job uses
+# http://garage:3900. RPC (3901) is left out on purpose -- it is only for
+# Garage nodes talking to each other, and there is just one node.
+apiVersion: v1
+kind: Service
+metadata:
+  name: garage
+spec:
+  selector:
+    app: garage
+  ports:
+    - name: s3-api
+      port: 3900
+      targetPort: 3900
+    - name: admin
+      port: 3903
+      targetPort: 3903
