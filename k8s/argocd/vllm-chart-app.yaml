@@ -1,5 +1,5 @@
 # Phase 2 task #9: ArgoCD Application for the vLLM serving stack (Helm
-# chart source). Kept separate from MinIO's Application (minio-app.yaml) --
+# chart source). Kept separate from Garage's Application (garage-app.yaml) --
 # storage is shared platform infrastructure, not part of the serving
 # workload, so it gets its own sync/rollback unit. See PHASE2_LOG.md.
 #

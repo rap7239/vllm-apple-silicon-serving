@@ -24,8 +24,13 @@ nodes:
     # PVC/local-path volume lives inside the node's own ephemeral container
     # filesystem and is destroyed by `kind delete cluster`; a hostPath
     # volume pointed at this mounted path is NOT -- it's the Mac's real
-    # disk the whole time, so MinIO's data genuinely survives tearing the
-    # cluster down and recreating it.
+    # disk the whole time, so the object store's data genuinely survives
+    # tearing the cluster down and recreating it.
+    #
+    # The Mac-side directory must NOT be inside an iCloud-synced folder
+    # (~/Documents, ~/Desktop): "Optimize Mac Storage" evicts file contents,
+    # and reads through Docker's file sharing then fail with EDEADLK. That
+    # is what broke MinIO in 2026-10 (PHASE2_LOG.md).
     extraMounts:
-      - hostPath: /Users/rahulpunde/Projects/vllm-apple-silicon-serving/k8s/minio-data
-        containerPath: /mnt/minio-data
+      - hostPath: /Users/rahulpunde/Projects/vllm-apple-silicon-serving/k8s/garage-data
+        containerPath: /mnt/garage-data

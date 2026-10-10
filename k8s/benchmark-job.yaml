@@ -13,11 +13,16 @@
 # this Job's pod (and its logs) before we've had a chance to inspect
 # `kubectl logs` / `kubectl get pods` -- delete it manually once done.
 #
-# MINIO_ROOT_USER/PASSWORD: demo credentials matching k8s/minio-deployment.yaml,
-# consumed by run_and_upload.sh's `mc alias set` step to push results into
-# the object store after run_bench.py finishes (durable, survives cluster
-# teardown) in addition to the PVC copy below (not durable across
-# `kind delete cluster`, but kept for the direct comparison).
+# S3_* / AWS_* env: consumed by the harness's scripts/upload_results.py
+# (boto3), which run_and_upload.sh calls after run_bench.py finishes, to
+# push results into Garage (durable, survives cluster teardown) in addition
+# to the PVC copy below (not durable across `kind delete cluster`, but kept
+# for the direct comparison). The keys come from the same hand-made
+# garage-credentials Secret Garage itself reads -- see
+# garage-deployment.yaml -- so no credential is written in git.
+#
+# Objects are keyed by file name and S3 overwrites on PUT, so a new
+# --variant gets new objects; reusing a variant replaces the old ones.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -32,7 +37,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: bench
-          image: vllm-bench-harness:v1
+          image: vllm-bench-harness:v2
           imagePullPolicy: IfNotPresent
           args:
             - --base-url
@@ -46,13 +51,25 @@ spec:
             - --concurrency
             - "5"
             - --variant
-            - k8s-job-minio
+            - k8s-job-garage
             - --no-gpu-metrics
           env:
-            - name: MINIO_ROOT_USER
-              value: "minioadmin"
-            - name: MINIO_ROOT_PASSWORD
-              value: "minioadmin"
+            - name: S3_ENDPOINT
+              value: http://garage:3900
+            - name: S3_BUCKET
+              value: bench-results
+            - name: AWS_DEFAULT_REGION
+              value: garage
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: garage-credentials
+                  key: GARAGE_DEFAULT_ACCESS_KEY
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: garage-credentials
+                  key: GARAGE_DEFAULT_SECRET_KEY
           volumeMounts:
             - name: bench-results
               mountPath: /app/runs
