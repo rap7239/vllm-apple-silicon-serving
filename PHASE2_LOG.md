@@ -742,8 +742,64 @@ same kind as `minio/minio:latest`: `ingress-nginx` was installed from its
 from its moving `stable` branch. The rebuild pins both
 (`controller-v1.15.1`, `v3.5.4`).
 
-_In progress — remaining: cluster rebuild with the pinned installs, the
-`garage-credentials` Secret, end-to-end verification (vLLM through
-ingress, ArgoCD Synced/Healthy, the 4 exported objects read back through
-in-cluster Garage, a benchmark Job uploading to Garage), then cleanup of
+### Cluster rebuilt (2026-10-10)
+
+Stopped the Docker test container first (it still had `garage-data` open),
+then rebuilt in order: `kind create` (node image now `kindest/node:v1.36.1`),
+images, pinned `ingress-nginx` + label + bug #8 `nodeSelector` patch,
+Prometheus Operator `v0.93.1` + `k8s/monitoring/`, ArgoCD `v3.5.4`, then
+the two Applications and the benchmark PVC. The worker's `ls
+/mnt/garage-data/data` listed the block folders written during the Docker
+test, which proves the bind mount rather than an empty directory Docker
+would have created in its place.
+
+Three findings along the way:
+
+**`kind load` fails on a pulled multi-arch image.** `kind load
+docker-image dxflrs/garage:v2.4.1` failed with `ctr: content digest
+sha256:0d7c74fc...: not found`. `docker images --tree` showed why: Docker
+Desktop's containerd image store keeps the whole multi-platform index but
+only the arm64 layers (amd64, 386 and arm listed at `0B`), and `kind load`
+imports with `--all-platforms`. The missing digest was the amd64 entry.
+The two locally built images (arm64 only) loaded fine. Fixed by pulling
+straight into the worker (`crictl pull docker.io/dxflrs/garage:v2.4.1`),
+so the pod still starts from the node's cache.
+
+**`kubectl wait --for=condition=available` passed with zero ready pods.**
+It returned `condition met` while the ingress controller was still
+`ContainerCreating`. The upstream manifest sets `maxUnavailable: 1` on a
+1-replica Deployment, and "Available" means ready pods >= replicas −
+maxUnavailable = 0, so the check could not fail. The same setting is why
+the bug #8 patch replaced the controller pod at once instead of waiting
+for the new one (the opposite of task #9's RollingUpdate bug, where the
+default 25% rounds down to 0 unavailable). The rebuild steps now wait on
+pod readiness instead (`--for=condition=ready pod -l ...`); for ArgoCD
+that also covers `argocd-application-controller`, a StatefulSet a
+Deployment-only wait skips. The `ingress-nginx-admission-patch` Job
+crash-looped briefly (it ran before `admission-create` had made the
+certificate Secret) and completed on retry.
+
+**Missing Secret, observed on purpose.** The Garage Application was
+applied before `garage-credentials` existed, to see the failure mode.
+Pod: `CreateContainerConfigError`, event `secret "garage-credentials" not
+found`, `RESTARTS 0` despite 9 failed attempts (no container was ever
+created, unlike MinIO's exit-1 `CrashLoopBackOff`). ArgoCD:
+`Synced`/`Progressing`. Synced because the Secret isn't in git, so
+nothing declared is missing; Progressing (not yet Degraded) until the
+Deployment's 600 s progress deadline. After `kubectl create secret
+generic garage-credentials --from-env-file=...`, the same pod recovered
+on the kubelet's next retry without being deleted, and the app went
+`Synced`/`Healthy`. The full Garage log has no `Creating` lines: it
+opened the existing `meta/db.sqlite` and the stored node identity, so the
+layout, key and bucket from the Docker test were reused. Readiness on
+`/health` passing confirms the node ID matched the stored layout.
+
+End state: `garage` and `vllm-chart` both `Synced`/`Healthy`; all
+workload pods on the worker (control-plane `NoSchedule` taint);
+`bench-results-pvc` `Pending` by design (local-path uses
+`WaitForFirstConsumer`).
+
+_In progress — remaining: end-to-end verification (vLLM completion
+through ingress, the 4 exported objects read back through in-cluster
+Garage, a benchmark Job uploading to Garage, Grafana), then cleanup of
 `k8s/minio-data`, the `~/Documents` originals and the venvs._
