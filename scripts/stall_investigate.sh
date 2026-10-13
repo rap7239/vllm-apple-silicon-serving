@@ -3,9 +3,9 @@ set -u
 
 API_PID=64114
 ENGINE_PID=64206
-OUTDIR="stall_dumps"
+RESULTS="$(cd "$(dirname "$0")/../results" && pwd)"
+OUTDIR="$RESULTS/stall_dumps"
 mkdir -p "$OUTDIR"
-rm -f "$OUTDIR"/*.txt
 
 curl -s -w "\nHTTP:%{http_code}\n" \
   -H "Authorization: Bearer local-vllm-key" \

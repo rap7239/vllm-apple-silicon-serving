@@ -4,7 +4,7 @@ set -euo pipefail
 MODEL="${MODEL:-mlx-community/Mistral-7B-Instruct-v0.3-4bit}"
 VLLM_API_KEY="${VLLM_API_KEY:-local-vllm-key}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-2048}"
-# The vllm-metal install script (see Task1_Deploy_vLLM_M4Mac.md) creates its
+# The vllm-metal install script (see docs/Task1_Deploy_vLLM_M4Mac.md) creates its
 # venv at ~/.venv-vllm-metal, not a project-relative .venv-metal folder. This
 # default previously pointed at the wrong path/name entirely -- it happened
 # to go unnoticed in every prior session because a server was already

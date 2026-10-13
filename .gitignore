@@ -7,3 +7,4 @@ __pycache__/
 *.log
 k8s/minio-data/
 k8s/garage-data/
+*.code-workspace

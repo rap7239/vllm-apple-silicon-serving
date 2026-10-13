@@ -5,7 +5,8 @@
 # script during the 50-request burst.
 set -u
 
-OUT="burst_timeseries.csv"
+RESULTS="$(cd "$(dirname "$0")/../results" && pwd)"
+OUT="$RESULTS/burst_timeseries.csv"
 echo "timestamp,running,waiting,kv_cache_used_pct,gpu_freq_mhz" > "$OUT"
 
 last=""

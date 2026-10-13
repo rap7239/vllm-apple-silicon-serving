@@ -20,7 +20,7 @@
 # exporter's /metrics (both running natively on the Mac).
 services:
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v3.13.2
     container_name: vllm-prometheus
     ports:
       - "9090:9090"
@@ -33,7 +33,7 @@ services:
     restart: unless-stopped
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:13.1.1
     container_name: vllm-grafana
     ports:
       - "3000:3000"

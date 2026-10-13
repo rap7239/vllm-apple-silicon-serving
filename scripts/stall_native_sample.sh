@@ -2,8 +2,9 @@
 set -u
 
 ENGINE_PID=48069
-OUT="stall_dumps/native_sample_$(date +%H%M%S).txt"
-mkdir -p stall_dumps
+RESULTS="$(cd "$(dirname "$0")/../results" && pwd)"
+OUT="$RESULTS/stall_dumps/native_sample_$(date +%H%M%S).txt"
+mkdir -p "$RESULTS/stall_dumps"
 
 echo "Priming sudo credentials first, so the real sample later isn't blocked on a password prompt..."
 sudo -v

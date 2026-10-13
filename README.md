@@ -1,8 +1,5 @@
 # LLM Upskill via GPT — Week 1–4 Task 1
 
-This project follows the hands-on, first-principles, employer-demonstration
-approach defined in [LEARNING_AND_PORTFOLIO_STANDARD.md](LEARNING_AND_PORTFOLIO_STANDARD.md).
-
 See [PHASE1_LOG.md](PHASE1_LOG.md) for a full technical narrative of
 debugging decisions, root-cause investigations, and verification
 methodology across this project.
