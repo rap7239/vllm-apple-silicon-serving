@@ -859,7 +859,7 @@ the same hazard as `minio/minio:latest`. The cached images are Prometheus
 Before deleting, re-compared the `~/Documents` originals against the
 `~/Projects` copies (excluding `.git`, venvs and MinIO data): 136/136 and
 116/116 files. Only in the originals: the three MinIO manifests removed
-in `85f9e4b` and `__pycache__` files. Both original HEADs are ancestors
+in `d89a9e9` and `__pycache__` files. Both original HEADs are ancestors
 of the copies' HEADs, both copies match `origin/main`, and no original
 file had changed since the move. Then deleted `k8s/minio-data` (its 4
 objects are in git under `vllm-benchmark/runs/minio-export-2026-08-17/`

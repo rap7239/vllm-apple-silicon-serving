@@ -104,4 +104,4 @@ An earlier attempt at capturing a native stack trace produced a misleading resul
 
 ## Raw evidence available on request
 
-Full `py-spy` dumps (74 files across two live-stall reproductions) and native `sample` captures are preserved in this project's own repo history (`stall_dumps/`, commits `2e95a28` and `4a25ef3` in `vllm-apple-silicon-serving`), along with the continuous GPU power time-series (`burst_timeseries.csv`). Happy to attach specific excerpts or the raw files if useful for triage.
+Full `py-spy` dumps (74 files across two live-stall reproductions) and native `sample` captures are preserved in this project's own repo history (`stall_dumps/`, commits `efba8c0` and `d0f3dad` in `vllm-apple-silicon-serving`), along with the continuous GPU power time-series (`burst_timeseries.csv`). Happy to attach specific excerpts or the raw files if useful for triage.
