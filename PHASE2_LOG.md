@@ -799,7 +799,74 @@ workload pods on the worker (control-plane `NoSchedule` taint);
 `bench-results-pvc` `Pending` by design (local-path uses
 `WaitForFirstConsumer`).
 
-_In progress — remaining: end-to-end verification (vLLM completion
-through ingress, the 4 exported objects read back through in-cluster
-Garage, a benchmark Job uploading to Garage, Grafana), then cleanup of
-`k8s/minio-data`, the `~/Documents` originals and the venvs._
+### End-to-end verification (2026-10-13)
+
+Four checks on the rebuilt cluster, each against real data rather than
+pod status:
+
+1. **vLLM through the ingress.** `localhost:8080` → ingress-nginx →
+   Service → pod: `/health` 200 and a generated chat completion.
+2. **Exported objects through in-cluster Garage.** A read-only pod using
+   the Job's Secret listed `bench-results` and hashed each object; all 4
+   SHA-256 prefixes match the 2026-10-08 export (`0a54fb46`, `82c59fe3`,
+   `46c65cc4`, `01a3406d`).
+3. **Benchmark Job uploading to Garage.** `vllm-bench-job`, variant
+   `k8s-job-garage`, concurrency 5: 20/20 ok, 3m04s, both files uploaded.
+   The Garage objects and the PVC copies are byte-identical (`bbf58d60`
+   csv, `06a490c3` jsonl), and the 4 older objects were untouched.
+4. **Grafana.** The Phase 1 dashboard's "Tokens/sec vs Concurrency"
+   panel on the `Prometheus (K8s)` datasource (task #4's port-forward
+   bridge on 9092) shows the run: concurrency 5 from about 22:05:45 to
+   22:08 UTC, throughput levelling at 28–31 tok/s, about 6 tok/s per
+   request on CPU.
+
+Findings:
+
+**Client-side queueing, not server-side.** The harness reported
+queue waits up to 133 s, but `vllm:num_requests_waiting` stayed 0 the
+whole run while `num_requests_running` held at 5. vLLM was running every
+request it was given; the wait was requests queued for one of the
+harness's 5 client slots. The CPU backend is slow per request, not
+serialising them.
+
+**Throughput lags concurrency on the panel by 30–60 s.** The tokens/sec
+query is `rate(vllm:generation_tokens_total[1m])`, a trailing one-minute
+average, so it ramps after the burst starts and tails after it ends;
+`num_requests_running` is a gauge and moves at once. An artefact of the
+query, not of vLLM.
+
+**A Homebrew Grafana held `:3000`.** A `brew services` Grafana (13.2.2,
+installed 2026-09-21, outside this project) made Compose fail with
+`bind: address already in use`. Compose Grafana ran on `:3001` through
+an override file outside the repo (`ports: !override`; a plain override
+appends to the ports list and would still bind 3000).
+
+**`GF_SECURITY_ADMIN_PASSWORD` was ignored.** It only seeds the admin
+password when Grafana creates its database; `observability_grafana-data`
+survived the October teardown (`compose down` without `-v`) and held the
+password changed in Phase 1. Reset with `grafana cli admin
+reset-admin-password`. The earlier failed logins had already tripped
+Grafana's brute-force lock (5 failures in 5 minutes), which rejects even
+the correct password until the window passes, and every retry extends
+it.
+
+**The Compose stack still uses `:latest`** for Prometheus and Grafana,
+the same hazard as `minio/minio:latest`. The cached images are Prometheus
+3.13.2 and Grafana 13.1.1; not pinned yet.
+
+### Cleanup (2026-10-13)
+
+Before deleting, re-compared the `~/Documents` originals against the
+`~/Projects` copies (excluding `.git`, venvs and MinIO data): 136/136 and
+116/116 files. Only in the originals: the three MinIO manifests removed
+in `85f9e4b` and `__pycache__` files. Both original HEADs are ancestors
+of the copies' HEADs, both copies match `origin/main`, and no original
+file had changed since the move. Then deleted `k8s/minio-data` (its 4
+objects are in git under `vllm-benchmark/runs/minio-export-2026-08-17/`
+and in Garage) and both originals, venvs included: about 78,700 files in
+13 s with `rm -rf`, no iCloud downloads (deleting an evicted file needs
+no content, unlike copying it), recoverable from iCloud's Recently
+Deleted for 30 days. The `~/Projects` copies have no venvs; recreate
+them from the requirements files when running locally.
+
+The Garage rebuild is complete. Next: Phase 2-close (master plan v5).
