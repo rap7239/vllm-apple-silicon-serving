@@ -5,6 +5,5 @@ __pycache__/
 *.pyc
 .DS_Store
 *.log
-k8s/minio-data/
 k8s/garage-data/
 *.code-workspace
