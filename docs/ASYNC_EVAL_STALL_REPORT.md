@@ -1,5 +1,24 @@
 # `mx.async_eval()` occasionally blocks for tens of seconds to minutes after idle, with the GPU doing no measurable work
 
+> **Status (2026-10-13): not filed as a new issue.** Written in August 2026
+> as a draft upstream report. In October, upstream identified a likely
+> mechanism: [ml-explore/mlx#4609](https://github.com/ml-explore/mlx/issues/4609)
+> (MLX requests residency for wired memory once and never renews it; macOS
+> releases it about 2 s after the GPU goes idle), fixed on MLX `main` by
+> [#4633](https://github.com/ml-explore/mlx/pull/4633)
+> (`MLX_METAL_RESIDENCY_REFRESH_INTERVAL_MS`), not yet in a release.
+>
+> An A/B rerun on 2026-10-13 (same mlx 0.32.0 / vllm-metal versions, macOS
+> 26.7, 12 min idle, two runs each way, alternating) did **not** reproduce
+> the 30 s to 6 min stalls: the first request after idle took 9 to 12 s TTFT.
+> Wired memory fell from about 13 GiB after a request to 2.5 to 3.9 GiB after
+> idle, and the next request re-wired it while swap grew 1 to 2.5 GB, with
+> `iogpu.disable_wired_collector=1` making no difference on this macOS
+> version. No warm baseline was taken, and the #4633 fix was not tested.
+> The data was added as [a comment on #4609](https://github.com/ml-explore/mlx/issues/4609#issuecomment-6158511386)
+> instead of a new issue. The
+> August report below is kept unchanged as the original investigation.
+
 **Suggested title for filing:** `mx.async_eval() blocks in eval_impl's condition_variable::wait for 30s-6min+ after the engine sits idle, GPU shows no activity during the stall`
 
 **Where to file:** primarily [`vllm-project/vllm-metal`](https://github.com/vllm-project/vllm-metal) (where this was first observed, in `vllm_metal/v1/model_runner.py`), and worth cross-posting to [`ml-explore/mlx`](https://github.com/ml-explore/mlx) since the actual blocking call lives inside MLX's own native code (`libmlx.dylib`), not vllm-metal's Python layer. Same pattern as this project's two prior upstream reports ([`vllm-metal#274`](https://github.com/vllm-project/vllm-metal/issues/274), [`tvm-ffi#697`](https://github.com/apache/tvm-ffi/issues/697)/[`xgrammar#799`](https://github.com/mlc-ai/xgrammar/issues/799)) — see this repo's `README.md`.
