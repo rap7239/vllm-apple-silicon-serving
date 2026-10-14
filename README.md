@@ -1,8 +1,34 @@
-# LLM Upskill via GPT — Week 1–4 Task 1
+# vLLM on Apple Silicon: serving, load testing and Kubernetes on a 16 GB M4 Mac mini
 
-See [PHASE1_LOG.md](PHASE1_LOG.md) for a full technical narrative of
-debugging decisions, root-cause investigations, and verification
-methodology across this project.
+Serving a 4-bit Mistral-7B with vLLM-Metal, finding where it saturates and
+what a latency stall costs, then running the same stack on Kubernetes (kind)
+with Helm, Prometheus and ArgoCD. Every number below comes from a real run;
+the logs record how each one was measured and what went wrong on the way.
+
+## Headline findings
+
+- **Saturation between 25 and 50 concurrent requests.** Aggregate throughput
+  scales about 5x from 1 to 25 concurrent (14.8 → 73.4 tok/s) and then
+  plateaus, while TTFT p95 roughly doubles from 25 to 50 concurrent
+  (1.0 → 2.1 s).
+- **4-bit beats 8-bit on this machine beyond memory.** TPOT 65.9 ms vs
+  104.7 ms at concurrency 1, and the smaller weights leave room for 26.3x
+  vs 12.2x concurrent 2,048-token requests in the KV cache
+  ([write-up](docs/Task7_Quantization_Tradeoffs.md)).
+- **A first-token stall after idle costs ~3.6x per token.** Stalls of 30 s
+  to 6 min, traced to `mx.async_eval` waiting in MLX's `eval_impl` while the
+  GPU sat idle. A cost model on live power telemetry priced a stalled run at
+  $0.005004 vs $0.001394 per 1K tokens. Upstream later identified a likely
+  mechanism ([ml-explore/mlx#4609](https://github.com/ml-explore/mlx/issues/4609));
+  see [Known issues](#known-issues-filed-upstream).
+- **Kubernetes on kind, every failure written down.** Helm chart,
+  ServiceMonitor scraping into Grafana, the benchmark harness as a Job
+  uploading to an S3 store (Garage), and ArgoCD GitOps, including a
+  scheduler race and a field Kubernetes silently pruned instead of
+  rejecting ([PHASE2_LOG.md](PHASE2_LOG.md)).
+
+Full narratives: [PHASE1_LOG.md](PHASE1_LOG.md) (serving, benchmarking,
+observability) and [PHASE2_LOG.md](PHASE2_LOG.md) (Kubernetes).
 
 ## Goal
 
@@ -154,7 +180,8 @@ MODEL=mistralai/Mistral-7B-Instruct-v0.3 \
 
 ## Known issues filed upstream
 
-While building this, two real bugs were identified, root-caused, and reported upstream rather than just worked around silently:
+Bugs found while building this, root-caused and reported upstream rather than worked around silently:
 
 - **[apache/tvm-ffi#697](https://github.com/apache/tvm-ffi/issues/697)** — segfault in `TVMFFIEnvRegisterCAPI` on macOS arm64 with `apache-tvm-ffi==0.1.13`; resolved by pinning `0.1.12` (see the compatibility note above). Cross-posted to **[mlc-ai/xgrammar#799](https://github.com/mlc-ai/xgrammar/issues/799)**, since `xgrammar` is the dependency most people will actually hit this crash through.
 - **[vllm-project/vllm-metal#274](https://github.com/vllm-project/vllm-metal/issues/274)** — investigated a Metal OOM crash class on this hardware; found the specific mechanism already covered in more depth by **[vllm-project/vllm-metal#398](https://github.com/vllm-project/vllm-metal/issues/398)** (`metal_limit` reported by Metal is meaningfully less than total system RAM), which was closed via a merged fix. Independently reproduced the same `metal_limit`-vs-total-RAM arithmetic on this machine — see the `--gpu-memory-utilization` breakdown in Phase 1 notes.
+- **[ml-explore/mlx#4609](https://github.com/ml-explore/mlx/issues/4609)** — the first-token stall after idle. Upstream traced a likely mechanism to MLX's wired-memory residency lapsing about 2 s after the GPU goes idle, fixed on `main` by [#4633](https://github.com/ml-explore/mlx/pull/4633). A rerun here did not reproduce the August stalls but showed ~10 GiB unwired during idle, with the `sysctl` workaround ineffective on macOS 26.7; [data added to the issue](https://github.com/ml-explore/mlx/issues/4609#issuecomment-6158511386). Original investigation: [docs/ASYNC_EVAL_STALL_REPORT.md](docs/ASYNC_EVAL_STALL_REPORT.md).

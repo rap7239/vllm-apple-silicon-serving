@@ -847,6 +847,29 @@ between 25 and 50, not at 50 itself. Task 4's stated deliverable
 at each step") is complete, with the added finding of exactly where the
 curve bends.
 
+> **Correction (2026-10-13): the aggregate tok/s column above is wrong.**
+> `analyze.py` divided total tokens by the longest *single* request's
+> `total_ms` instead of the run's wall-clock span, overstating throughput
+> by up to ~19x (282.4 at concurrency 1, where per-request throughput was
+> 14.7). Recomputed from the same CSVs, using `queue_wait_ms + total_ms`
+> as each request's completion offset (all tasks are created at once):
+>
+> | Concurrency | Aggregate tok/s (steady state) | Whole run, warmup included | Per-request mean |
+> |---|---|---|---|
+> | 1  | 14.8 | 14.5 | 14.7 |
+> | 5  | 25.4 | 26.9 | 6.1 |
+> | 10 | 36.7 | 39.5 | 4.8 |
+> | 25 | 73.4 | 71.0 | 4.5 |
+> | 50 | 54.3 | 79.2 | 3.0 |
+>
+> Throughput scales about 5x from 1 to 25 concurrent, then plateaus. The
+> "drop at 50" does not hold up: the steady-state window at 50 mostly
+> covers the run's draining tail, and counting the whole run gives 79.2
+> tok/s at 50 vs 71.0 at 25. The TTFT percentiles and the p95/p99
+> inflection at 50 are unaffected. Concurrency 10 is not a dip either; that
+> was an artefact of the same bug. The original table and text are kept
+> above as written.
+
 ## Meta-lesson for the writeup
 
 This closing entry has the same shape as most of the entries before it,

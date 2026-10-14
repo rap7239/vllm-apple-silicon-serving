@@ -69,6 +69,25 @@ detector documented in `PHASE1_LOG.md`):
 
 Chart: `vllm-benchmark/charts/saturation_curve.png`.
 
+> **Correction (2026-10-13): the aggregate tok/s column above is wrong**,
+> overstated by `analyze.py` dividing by the longest single request instead
+> of the run's wall-clock span (see the correction note in `PHASE1_LOG.md`'s
+> Task 4 close-out). Recomputed from the same CSVs:
+>
+> | Variant | Aggregate tok/s |
+> |---|---|
+> | 4-bit, concurrency=1 | 14.8 |
+> | 8-bit, concurrency=1 | 8.8 |
+> | 4-bit, concurrency=10 | 36.7 |
+> | 8-bit, concurrency=10 | 41.2 |
+>
+> So at concurrency 1, 8-bit delivers about 40% less throughput than 4-bit
+> (not "roughly halves", and not 282.4 → 135.9), consistent with the TPOT
+> gap. At concurrency 10, 8-bit is slightly *ahead* (41.2 vs 36.7); the
+> "non-monotonic dip" the caveat in section 6 relies on was an artefact of
+> the same bug, so that caveat no longer applies as written. TTFT and TPOT
+> figures are unaffected.
+
 ## 5. Internals — why the numbers look this way
 
 - **TPOT (time per output token) is the cleanest per-token compute signal.**
