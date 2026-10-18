@@ -1917,6 +1917,14 @@ Item #15 asks to articulate, out loud, which of TTFT/TPOT/ITL dominates for a gi
 - **Batch processing** — throughput/cost dominate, grounded in the real saturation curve (peak 147.5 tok/s at concurrency 25, dropping to 80.2 tok/s at 50). Follow-up admits the drop's mechanism was never root-caused past "measured inflection point."
 - **Coding assistant** — reworked after review to flag it as **conceptual, not benchmarked** directly in the subsection header (not just in the follow-up): argues ITL over TPOT via the item #3 masking mechanism (a single 25x-slower token gets diluted in an averaged TPOT but shows up in raw ITL), but states up front that no coding-assistant-shaped workload was ever actually run.
 
+> **Correction (2026-10-17):** the 147.5 and 80.2 tok/s figures in the
+> batch-processing bullet come from the aggregate-throughput bug corrected
+> on 2026-10-13 (see the correction note in the Task 4 close-out entry).
+> Recomputed, throughput scales about 5x from concurrency 1 to 25
+> (14.8 → 73.4 tok/s) and then plateaus: at 50 it is 54.3 tok/s steady
+> state and 79.2 tok/s over the whole run, so there is no robust drop to
+> explain.
+
 Reviewed with the user before closing; the one requested change (pulling the "not benchmarked" caveat up into the header rather than leaving it only in the follow-up) is applied.
 
 ### Item #15 — CLOSED

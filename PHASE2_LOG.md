@@ -870,3 +870,17 @@ Deleted for 30 days. The `~/Projects` copies have no venvs; recreate
 them from the requirements files when running locally.
 
 The Garage rebuild is complete. Next: Phase 2-close (master plan v5).
+
+## Entry: Phase 2-close, 2026-10-13 — a contaminated first measurement
+
+While rerunning the `mx.async_eval` stall test (see
+`docs/ASYNC_EVAL_STALL_REPORT.md`), the first warmup request took
+**308.3 s** to its first token. kind and the Docker Desktop VM (8.2 GB)
+were still running from the M8 verification, and swap grew from 8.9 to
+11.5 GB during the request. After quitting Docker Desktop, the same
+warmup request took **8.9 s**, about 35x faster. The 308 s run was
+discarded as invalid.
+
+Rule from here on: on this 16 GB Mac, quit Docker Desktop (and anything
+else memory-heavy) before measuring vLLM-metal, and record swap before
+and after every measurement so contamination shows up in the data.
