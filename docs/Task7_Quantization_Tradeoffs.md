@@ -90,21 +90,51 @@ Chart: `vllm-benchmark/charts/saturation_curve.png`.
 
 ## 5. Internals — why the numbers look this way
 
-- **TPOT (time per output token) is the cleanest per-token compute signal.**
-  8-bit's TPOT (104.7ms) is ~59% slower than 4-bit's (65.9ms) at the same
-  concurrency. This is the direct cost of quantization depth: 8-bit weights
-  require more compute per matrix multiply than 4-bit's more aggressively
-  packed representation, even though 8-bit is theoretically the
-  higher-fidelity format.
-- **Aggregate throughput at concurrency=1 roughly halves** (282.4 → 135.9
-  tok/s) for the same reason — slower per-token compute directly caps how
-  much total work one sequence can push through per second.
+- **TPOT (time per output token) tracks weight bytes read, plus a fixed
+  serving cost.** Decode is memory-bandwidth-bound: every output token reads
+  all the weights once. 8-bit reads 1.89x the bytes of 4-bit (7.70 vs
+  4.08GB), so bandwidth alone predicts ~89% higher TPOT. Through the server
+  it was 59% higher (104.7 vs 65.9ms). The raw-MLX check below shows why:
+  vLLM-metal adds ~23-28ms per token to both checkpoints, and a fixed cost
+  shrinks the ratio. (An earlier version of this section said 8-bit needs
+  more compute per matrix multiply. That was backwards: 4-bit does *more*
+  arithmetic per byte, to unpack and rescale its weights; 8-bit is slower
+  because it moves more bytes.)
+- **Aggregate throughput at concurrency=1 drops by ~40%** (14.8 → 8.8
+  tok/s, the corrected figures in section 4), consistent with the TPOT gap:
+  with one request in flight, throughput is roughly 1000 / TPOT.
 - **KV budget, not raw compute, is what caps concurrency.** The
   `max_tokens_cached` numbers above (53,856 vs 25,024) are what actually
   determine how many simultaneous long-context requests the server can hold
   before it has to start queueing — this is a memory-capacity ceiling, not a
   latency curve, and it's the more operationally important number for a
   production deployment decision than any single percentile above.
+
+### Raw-MLX check: is the gap the server or the kernels? (added 2026-10-26)
+
+Prompted by reader feedback: if decode is bandwidth-bound, why is 8-bit only
+59% slower? Same checkpoints run through `mlx_lm` directly, no server
+(mlx_lm 0.31.3, MLX 0.32.0, one prompt, 256 output tokens, temperature 0,
+3 interleaved warm runs each, median; Docker quit to avoid swap):
+
+| | 4-bit | 8-bit | Ratio |
+|---|---|---|---|
+| TPOT via vLLM-metal (section 4) | 65.9ms | 104.7ms | 1.59x |
+| TPOT, raw `mlx_lm` | 42.4ms | 76.3ms | 1.80x |
+| Achieved bandwidth, raw (weight bytes / TPOT) | ~96GB/s | ~101GB/s | |
+| Share of the M4's 120GB/s | ~80% | ~84% | |
+
+- Without the server, both checkpoints run close to the bandwidth limit and
+  the ratio (1.80x) is near the 1.89x that bytes alone predict.
+- Fitting TPOT = fixed + bytes / bandwidth to the two raw points gives
+  ~107GB/s and ~4ms fixed per step. So any 4-bit-specific dequantization or
+  dispatch cost is at most ~4ms per step here; most of the compression to
+  1.59x comes from vLLM-metal's per-token overhead.
+- Cold first runs were ~15% slower (20.2 / 12.1 tok/s, ratio 1.67x) and
+  would have pointed to a larger 4-bit penalty. Only warm runs are used.
+- Limits: one prompt, two bit widths, three runs each. What the remaining
+  ~4ms is (dequantization, dispatch, attention, sampling) needs a Metal
+  trace; see section 7.
 
 ## 6. Engineering judgment — design decisions, tradeoffs, and honest caveats
 
@@ -156,6 +186,9 @@ flagged as open follow-up work, not assumed away.
   complete the tradeoff picture beyond memory/latency/throughput.
 - Investigate the session-level latency drift observed during the
   idle-recovery replications (thermal-throttling hypothesis, untested).
+- Metal trace of one decode step per checkpoint, to attribute the ~4ms
+  per-step cost left in raw MLX, and profile where vLLM-metal's ~23-28ms
+  per token goes (scheduler, sampling, streaming).
 
 ## Sources
 
