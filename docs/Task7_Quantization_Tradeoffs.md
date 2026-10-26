@@ -112,10 +112,10 @@ Chart: `vllm-benchmark/charts/saturation_curve.png`.
 
 ### Raw-MLX check: is the gap the server or the kernels? (added 2026-10-26)
 
-Prompted by reader feedback: if decode is bandwidth-bound, why is 8-bit only
-59% slower? Same checkpoints run through `mlx_lm` directly, no server
-(mlx_lm 0.31.3, MLX 0.32.0, one prompt, 256 output tokens, temperature 0,
-3 interleaved warm runs each, median; Docker quit to avoid swap):
+If decode is bandwidth-bound, why is 8-bit only 59% slower? Same checkpoints
+run through `mlx_lm` directly, no server (mlx_lm 0.31.3, MLX 0.32.0, one
+prompt, 256 output tokens, temperature 0, 3 interleaved warm runs each,
+median; Docker quit to avoid swap):
 
 | | 4-bit | 8-bit | Ratio |
 |---|---|---|---|
