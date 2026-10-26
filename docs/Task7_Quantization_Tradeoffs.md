@@ -136,6 +136,51 @@ median; Docker quit to avoid swap):
   ~4ms is (dequantization, dispatch, attention, sampling) needs a Metal
   trace; see section 7.
 
+### Batch-10 check: what changes under load? (added 2026-10-26)
+
+Section 4 showed the 4-bit/8-bit TPOT gap shrinking from 59% at
+concurrency 1 to 6% at concurrency 10. To see why, 10 identical requests
+were released at the same moment (same prompt and settings as the raw-MLX
+check, `ignore_eos`, 256 output tokens) so that all prefills finish before
+decode starts: TTFT spread was ~190ms and all 10 requests decoded in
+lockstep, so TPOT equals the time per decode step. The same batch was then
+run through `mlx_lm.batch_generate` with no server (warm-up batch
+discarded). Scripts: `scripts/batch_decode_check.py`,
+`scripts/raw_batch_check.py`; server via `scripts/serve.sh` with
+`GPU_MEMORY_UTILIZATION=0.92`, vllm-metal on vLLM 0.26.0.
+
+| Time per decode step | 4-bit, N=1 | 4-bit, N=10 | 8-bit, N=1 | 8-bit, N=10 |
+|---|---|---|---|---|
+| Through vLLM-metal | 62.6ms | ~198ms | | |
+| Raw `mlx_lm` | 43.9ms | 142.9ms | 76.8ms | 149.5ms |
+| Server's share | ~19ms | ~55ms | | |
+
+- **Batch 10 is compute-bound, not bandwidth-bound.** At N=1, 8-bit takes
+  1.75x as long as 4-bit, tracking the 1.89x weight bytes. At N=10 it takes
+  1.05x: reading nearly twice the bytes barely matters, so the step is
+  limited by work both formats share (the matrix arithmetic, ~145 GFLOP per
+  step, i.e. ~1 TFLOPS achieved). This is why the concurrency-10 gap in
+  section 4 is only 6%.
+- **No sign of a 4-bit dequantization penalty here.** If unpacking 4-bit
+  weights dominated, 4-bit would be slower than 8-bit at N=10; it is
+  slightly faster.
+- **Server overhead is not a fixed per-step cost.** It grows from ~19ms to
+  ~55ms per step (~4ms per extra sequence), so batching does not spread it
+  away. Most of the step-time growth (43.9 → 142.9ms) is MLX itself.
+- **Prefill interference was not the main factor at concurrency 10.** The
+  staggered-arrival run in section 4 (209.7ms) is only ~6% above this clean
+  decode-only step (~198ms).
+- **Batching still pays, less than ideal:** aggregate throughput rises ~3x
+  (about 16 → 49 tok/s through the server) for 10x the sequences.
+- **Operational takeaway:** under concurrent load, 8-bit costs little extra
+  latency on this machine, but still has less than half the KV cache
+  capacity (section 3). At concurrency, the choice between 4-bit and 8-bit
+  is a memory decision more than a latency decision.
+- Limits: one prompt, batch sizes 1 and 10 only, two runs each for the
+  server and one warm run each for raw MLX. 8-bit was not run through the
+  server in this check. Where the batch-10 step time goes inside MLX
+  (matmul, attention, sampling) needs a Metal trace.
+
 ## 6. Engineering judgment — design decisions, tradeoffs, and honest caveats
 
 **When 4-bit wins:** memory-constrained or high-concurrency deployments where
@@ -186,9 +231,10 @@ flagged as open follow-up work, not assumed away.
   complete the tradeoff picture beyond memory/latency/throughput.
 - Investigate the session-level latency drift observed during the
   idle-recovery replications (thermal-throttling hypothesis, untested).
-- Metal trace of one decode step per checkpoint, to attribute the ~4ms
-  per-step cost left in raw MLX, and profile where vLLM-metal's ~23-28ms
-  per token goes (scheduler, sampling, streaming).
+- Metal trace of one decode step per checkpoint, at batch 1 and batch 10,
+  to attribute the ~4ms per-step cost left in raw MLX at batch 1, find
+  where the batch-10 step time goes (matmul vs attention vs sampling), and
+  profile vLLM-metal's ~19-55ms share (scheduler, sampling, streaming).
 
 ## Sources
 
